@@ -237,6 +237,10 @@ struct Args {
     /// Specify the WAL file path for recording or backtesting
     #[arg(long, default_value = "trading.wal")]
     wal_file: String,
+
+    /// Override default config file path (default: configs/{mode}.toml)
+    #[arg(long)]
+    config: Option<String>,
 }
 
 /// Volatile state for a single instrument tracking.
@@ -292,14 +296,16 @@ async fn async_main() -> anyhow::Result<()> {
         _ => ExecutionMode::Paper,
     };
 
-    let config_file = match mode {
-        ExecutionMode::Backtest => "configs/backtest.toml",
-        ExecutionMode::Live => "configs/live.toml",
-        ExecutionMode::Paper => "configs/paper.toml",
-    };
+    let config_file = args.config.clone().unwrap_or_else(|| {
+        match mode {
+            ExecutionMode::Backtest => "configs/backtest.toml".to_string(),
+            ExecutionMode::Live => "configs/live.toml".to_string(),
+            ExecutionMode::Paper => "configs/paper.toml".to_string(),
+        }
+    });
 
-    let config_str = fs::read_to_string(config_file).unwrap_or_else(|_| {
-        fs::read_to_string(format!("../../{}", config_file)).expect("Could not find config file")
+    let config_str = fs::read_to_string(&config_file).unwrap_or_else(|_| {
+        fs::read_to_string(format!("../../{}", &config_file)).expect("Could not find config file")
     });
     let config: RunnerConfig = toml::from_str(&config_str).expect("Failed to parse config");
 
