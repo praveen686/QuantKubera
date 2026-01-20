@@ -402,6 +402,16 @@ pub mod wal {
             Ok(meta.get("instrument_info").cloned())
         }
 
+        /// Reads the canonical universe specification from WAL metadata.
+        /// Key: "universe_spec_v1".
+        pub fn read_universe_spec_v1(&mut self) -> anyhow::Result<Option<UniverseSpecV1>> {
+            let meta = self.read_meta_all()?;
+            match meta.get("universe_spec_v1") {
+                Some(v) => Ok(Some(serde_json::from_value(v.clone())?)),
+                None => Ok(None),
+            }
+        }
+
         /// Retrieves the next command/response record.
         pub fn next_order_event(&mut self) -> anyhow::Result<Option<OrderEvent>> {
             use std::io::BufRead;
@@ -494,6 +504,34 @@ pub mod wal {
         Risk(RiskEvent),
         Fill(FillEvent),
         Health(SystemHealthEvent),
+    }
+
+    /// Canonical trading universe specification persisted in WAL.
+    ///
+    /// This is intentionally minimal and stable. It exists to ensure every
+    /// replay/backtest has:
+    /// - an explicit list of subscribed instruments/symbols
+    /// - the venue + asset class intent
+    /// - optional per-instrument metadata (tokens, lot sizes, etc.)
+    ///
+    /// The *engine* treats this as authoritative, but connectors are free to
+    /// enrich it with extra fields via `extra`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct UniverseSpecV1 {
+        /// Schema version string, e.g. "v1".
+        pub version: String,
+        /// Venue identifier, e.g. "binance" or "zerodha".
+        pub venue: String,
+        /// Human readable universe name, e.g. "nse_index_expiries".
+        pub name: String,
+        /// Canonical list of symbols included in the run.
+        pub symbols: Vec<String>,
+        /// Optional instrument metadata keyed by symbol.
+        #[serde(default)]
+        pub instruments: std::collections::HashMap<String, serde_json::Value>,
+        /// Free-form extra metadata for experiments.
+        #[serde(default)]
+        pub extra: serde_json::Value,
     }
 }
 

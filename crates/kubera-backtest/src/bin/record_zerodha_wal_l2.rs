@@ -12,7 +12,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use kubera_core::wal::WalWriter;
+use kubera_core::wal::{UniverseSpecV1, WalWriter};
 use kubera_models::{L2Level, L2Snapshot, MarketEvent, MarketPayload};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -108,6 +108,41 @@ fn read_tokens(tokens_file: &Path) -> Result<Vec<i64>> {
     Ok(tokens)
 }
 
+fn read_universe_json(path: &Path) -> Result<UniverseSpecV1> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read universe json: {}", path.display()))?;
+    let mut spec: UniverseSpecV1 = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid universe json: {}", path.display()))?;
+    if spec.version.trim().is_empty() {
+        spec.version = "v1".to_string();
+    }
+    if spec.venue.trim().is_empty() {
+        spec.venue = "zerodha".to_string();
+    }
+    if spec.symbols.is_empty() {
+        return Err(anyhow!("universe json has empty symbols"));
+    }
+    Ok(spec)
+}
+
+fn tokens_from_universe(spec: &UniverseSpecV1) -> Result<Vec<i64>> {
+    let mut out = Vec::new();
+    for sym in &spec.symbols {
+        let Some(v) = spec.instruments.get(sym) else {
+            return Err(anyhow!("universe missing instruments entry for symbol: {sym}"));
+        };
+        let token = v
+            .get("token")
+            .and_then(|x| x.as_i64())
+            .ok_or_else(|| anyhow!("instrument metadata missing token for symbol: {sym}"))?;
+        out.push(token);
+    }
+    if out.is_empty() {
+        return Err(anyhow!("universe produced empty token list"));
+    }
+    Ok(out)
+}
+
 fn depth_to_snapshot(depth: &DepthMsg, update_id: u64) -> L2Snapshot {
     // Zerodha depth is typically best-5.
     let bids = depth
@@ -141,6 +176,7 @@ fn main() -> Result<()> {
     let seconds = parse_arg_u64("--seconds", &args, 600);
     let snapshot_every_s = parse_arg_u64("--snapshot-every", &args, 5);
     let tokens_file = parse_arg_path("--tokens-file", &args, "tokens.txt");
+    let universe_json = parse_arg("--universe-json", &args).map(PathBuf::from);
 
     // Optional: override python executable (e.g. python3.11)
     let python = parse_arg("--python", &args).unwrap_or_else(|| "python3".to_string());
@@ -154,7 +190,18 @@ fn main() -> Result<()> {
         ));
     }
 
-    let tokens = read_tokens(&tokens_file)?;
+    // Prefer universe-json (canonical) -> derive tokens; fall back to tokens file.
+    let universe_spec: Option<UniverseSpecV1> = match &universe_json {
+        Some(p) => Some(read_universe_json(p)?),
+        None => None,
+    };
+
+    let tokens = if let Some(spec) = &universe_spec {
+        tokens_from_universe(spec)?
+    } else {
+        eprintln!("[record_zerodha_wal_l2] WARN: --universe-json not provided; falling back to --tokens-file. Consider generating a universe spec and embedding it in WAL for deterministic replay.");
+        read_tokens(&tokens_file)?
+    };
     eprintln!(
         "[record_zerodha_wal_l2] recording {} tokens for {}s; snapshots every {}s -> {}",
         tokens.len(),
@@ -193,6 +240,11 @@ fn main() -> Result<()> {
     let mut lot_sizes: HashMap<String, u32> = HashMap::new();
     let mut update_id: u64 = 1;
     let mut metadata_received = false;
+
+    // Persist universe spec upfront for deterministic replay.
+    if let Some(spec) = &universe_spec {
+        wal.write_meta("universe_spec_v1", spec)?;
+    }
 
     let start = Instant::now();
     let mut last_periodic = Instant::now();
