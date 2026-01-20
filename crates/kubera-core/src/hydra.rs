@@ -155,6 +155,18 @@ pub struct HydraConfig {
     pub autocorrelation_range_threshold: f64,
     /// Edge hurdle multiplier (e.g. 2.5 means edge > 2.5 * costs)
     pub edge_hurdle_multiplier: f64,
+
+    // ========== BINANCE TUNING PATCH ==========
+    /// Minimum edge in bps required to trade (hard floor)
+    pub min_edge_bps: f64,
+    /// Latency-induced slippage in bps (signal→fill drift)
+    pub latency_slippage_bps: f64,
+    /// Include half-spread in cost calculation
+    pub include_spread_in_cost: bool,
+    /// Minimum milliseconds between signals
+    pub min_ms_between_signals: i64,
+    /// Minimum milliseconds to hold a position
+    pub min_ms_hold: i64,
 }
 
 impl Default for HydraConfig {
@@ -195,6 +207,13 @@ impl Default for HydraConfig {
             hurst_range_threshold: 0.45,
             autocorrelation_range_threshold: -0.1,
             edge_hurdle_multiplier: 2.5, // Default to strict Masterpiece filter
+
+            // BINANCE TUNING PATCH defaults
+            min_edge_bps: 8.0,              // Minimum 8bps edge required
+            latency_slippage_bps: 5.0,      // Observed ~5bps signal→fill drift
+            include_spread_in_cost: true,
+            min_ms_between_signals: 5000,   // 5 seconds between signals
+            min_ms_hold: 5000,              // 5 seconds minimum hold
         }
     }
 }
@@ -3082,6 +3101,8 @@ pub struct HydraStrategy {
     lot_sizes: HashMap<String, u32>,
     /// NSE: Default lot size for unknown symbols (0 = no rounding)
     default_lot_size: u32,
+    /// BINANCE TUNING: Last signal timestamp in milliseconds
+    last_signal_ts_ms: i64,
 }
 
 impl HydraStrategy {
@@ -3136,6 +3157,7 @@ impl HydraStrategy {
             risk_free_rate: 0.065, // India RBI repo rate ~6.5%
             lot_sizes: HashMap::new(),
             default_lot_size: 0, // 0 = no rounding (crypto), set via set_lot_size for NSE
+            last_signal_ts_ms: 0, // BINANCE TUNING: Initialize to 0
         }
     }
 
@@ -3414,6 +3436,13 @@ impl HydraStrategy {
                         price,
                         quantity: hedge_lots * greeks_mgr.get_lot_size() as f64, // Convert lots to quantity
                         intent_id: None, // Hedges don't need attribution
+                        // HFT V2 decision context (hedges use current price)
+                        decision_bid: price,
+                        decision_ask: price,
+                        decision_mid: price,
+                        spread_bps: 0.0,
+                        book_ts_ns: 0,
+                        expected_edge_bps: 0.0, // Hedges are risk management, not alpha
                     };
 
                     if let Err(e) = bus.publish_signal_sync(hedge_signal) {
@@ -3439,13 +3468,33 @@ impl HydraStrategy {
         // --- PORTFOLIO POSITION LIMIT ENFORCEMENT ---
         target_pos = target_pos.clamp(-self.config.max_position_abs, self.config.max_position_abs);
 
-        // Check cost-adjusted edge (Masterpiece: Trade when edge > hurdle * costs)
-        let total_cost = self.config.slippage_bps + self.config.commission_bps;
+        // ========== BINANCE TUNING: Enhanced cost model ==========
+        // Include latency slippage (observed ~5bps signal→fill drift)
+        let base_cost = self.config.slippage_bps + self.config.commission_bps + self.config.latency_slippage_bps;
+        // Note: spread estimation would require book tracking - use base cost for now
+        let total_cost = base_cost;
+
+        // Required edge = max(min_edge_bps, hurdle * total_cost)
         let hurdle = self.config.edge_hurdle_multiplier;
-        if weighted_edge < total_cost * hurdle {
-            debug!("[HYDRA] Edge {:.1}bps < cost {:.1}bps * {:.1}, skipping", weighted_edge, total_cost, hurdle);
+        let required_edge = self.config.min_edge_bps.max(total_cost * hurdle);
+
+        if weighted_edge < required_edge {
+            debug!("[HYDRA] Edge {:.1}bps < required {:.1}bps (cost={:.1}bps, hurdle={:.1}), skipping",
+                   weighted_edge, required_edge, total_cost, hurdle);
             self.is_processing = false;
             return;
+        }
+
+        // ========== BINANCE TUNING: Time-based cooldown ==========
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if self.config.min_ms_between_signals > 0 && self.last_signal_ts_ms > 0 {
+            let elapsed_ms = now_ms - self.last_signal_ts_ms;
+            if elapsed_ms < self.config.min_ms_between_signals {
+                debug!("[HYDRA] Signal cooldown active ({}ms < {}ms), skipping",
+                       elapsed_ms, self.config.min_ms_between_signals);
+                self.is_processing = false;
+                return;
+            }
         }
 
         // --- MASTERPIECE: TRAILING ALPHA-STOP ---
@@ -3499,7 +3548,7 @@ impl HydraStrategy {
                 self.active_intents.insert(intent.intent_id, intent.clone());
             }
 
-            // Publish signal
+            // Publish signal with HFT V2 decision context
             if let Some(bus) = &self.bus {
                 let signal = SignalEvent {
                     timestamp: chrono::DateTime::from_timestamp(timestamp / 1000, 0)
@@ -3510,10 +3559,20 @@ impl HydraStrategy {
                     price,
                     quantity: qty,
                     intent_id: best_intent.as_ref().map(|i| i.intent_id),
+                    // HFT V2 decision context (use price as fallback if no book)
+                    decision_bid: price,
+                    decision_ask: price,
+                    decision_mid: price,
+                    spread_bps: 0.0,
+                    book_ts_ns: 0,
+                    expected_edge_bps: self.config.edge_hurdle_multiplier * (self.config.slippage_bps + self.config.commission_bps),
                 };
 
                 if let Err(e) = bus.publish_signal_sync(signal) {
                     warn!("[HYDRA] Failed to publish signal: {}", e);
+                } else {
+                    // BINANCE TUNING: Update last signal timestamp
+                    self.last_signal_ts_ms = chrono::Utc::now().timestamp_millis();
                 }
             }
 

@@ -104,6 +104,13 @@ impl AeonStrategy {
                 price,
                 quantity,
                 intent_id: None,
+                // HFT V2: Default book context (AEON doesn't track LOB)
+                decision_bid: price,
+                decision_ask: price,
+                decision_mid: price,
+                spread_bps: 0.0,
+                book_ts_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                expected_edge_bps: 0.0,
             };
 
             // Update target position based on signal

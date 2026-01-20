@@ -43,6 +43,13 @@ async fn test_full_trading_lifecycle() {
         price: 50005.0,
         strategy_id: "momentum_test".to_string(),
         intent_id: None,
+        // HFT V2: Default book context for test
+        decision_bid: 50005.0,
+        decision_ask: 50005.0,
+        decision_mid: 50005.0,
+        spread_bps: 0.0,
+        book_ts_ns: 0,
+        expected_edge_bps: 0.0,
     };
 
     // 4. Convert Signal to Order

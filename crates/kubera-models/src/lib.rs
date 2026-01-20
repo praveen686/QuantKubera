@@ -138,6 +138,26 @@ pub struct SignalEvent {
     pub quantity: f64,
     /// Unique identifier for the intent that generated this signal.
     pub intent_id: Option<Uuid>,
+
+    // ========== HFT Decision Context (V2) ==========
+    /// Best bid price at decision time
+    #[serde(default)]
+    pub decision_bid: f64,
+    /// Best ask price at decision time
+    #[serde(default)]
+    pub decision_ask: f64,
+    /// Mid price at decision time ((bid + ask) / 2)
+    #[serde(default)]
+    pub decision_mid: f64,
+    /// Spread in basis points at decision time
+    #[serde(default)]
+    pub spread_bps: f64,
+    /// Book timestamp (exchange time) in nanoseconds - for causality checks
+    #[serde(default)]
+    pub book_ts_ns: i64,
+    /// Expected edge in basis points (from strategy signal)
+    #[serde(default)]
+    pub expected_edge_bps: f64,
 }
 
 /// Normalized order lifecycle event.

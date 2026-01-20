@@ -149,6 +149,13 @@ impl OrasStrategy {
                 price,
                 quantity: 0.5, // Conservative sizing for flagship
                 intent_id: None,
+                // HFT V2: Default book context (ORAS doesn't track LOB)
+                decision_bid: price,
+                decision_ask: price,
+                decision_mid: price,
+                spread_bps: 0.0,
+                book_ts_ns: timestamp * 1_000_000,
+                expected_edge_bps: 0.0,
             };
             let _ = bus.publish_signal_sync(signal);
         }

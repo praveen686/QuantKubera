@@ -197,6 +197,13 @@ impl MomentumStrategy {
                 price,
                 quantity: 1.0,
                 intent_id: None,
+                // HFT V2: Default book context (simple strategy doesn't track LOB)
+                decision_bid: price,
+                decision_ask: price,
+                decision_mid: price,
+                spread_bps: 0.0,
+                book_ts_ns: 0,
+                expected_edge_bps: 0.0,
             };
             let _ = bus.publish_signal_sync(signal);
         }

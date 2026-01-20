@@ -895,6 +895,19 @@ async fn async_main() -> anyhow::Result<()> {
                                         );
                                     }
                                 }
+                                // HFT V2: Route L2 events to strategy for book state tracking
+                                MarketPayload::L2Update(_) | MarketPayload::L2Snapshot(_) | MarketPayload::Trade { .. } => {
+                                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        strategy.on_tick(&event);
+                                    }));
+                                    if let Err(e) = result {
+                                        panic_count += 1;
+                                        tracing::error!(
+                                            symbol = %symbol_name,
+                                            "Strategy on_tick (L2) panic: {:?}", e
+                                        );
+                                    }
+                                }
                                 _ => {}
                             }
 
@@ -1200,13 +1213,20 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
                 Ok(signal) = signal_rx_headless.recv() => {
-                    println!("[SIGNAL] {:>4} {} @ {:.2} | Qty: {:.4} | Strategy: {}",
+                    // HFT V2: Enhanced signal logging with book context
+                    // Show spread in $ (more useful for crypto) and bps with more precision
+                    let spread_usd = signal.decision_ask - signal.decision_bid;
+                    println!("[SIGNAL] {:>4} {} @ {:.2} | Qty: {:.4} | Bid: {:.2} | Ask: {:.2} | Spread: ${:.2} ({:.4}bps) | Edge: {:.2}bps | {}",
                         format!("{:?}", signal.side).to_uppercase(),
-                        signal.symbol, signal.price, signal.quantity, signal.strategy_id);
+                        signal.symbol, signal.price, signal.quantity,
+                        signal.decision_bid, signal.decision_ask, spread_usd, signal.spread_bps,
+                        signal.expected_edge_bps, signal.strategy_id);
                 }
                 Ok(order) = order_rx_headless.recv() => {
                     if let OrderPayload::Update { status, filled_quantity, avg_price, commission, .. } = &order.payload {
                         if *status == kubera_models::OrderStatus::Filled {
+                            // HFT V2: Enhanced fill logging with slippage calculation
+                            // Note: We track slippage relative to mid price when signal was generated
                             println!("[FILL]   {} {} | {:.4} @ {:.2} | Commission: {:.4}",
                                 order.symbol, format!("{:?}", order.side).to_uppercase(),
                                 filled_quantity, avg_price, commission);

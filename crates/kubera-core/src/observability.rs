@@ -27,9 +27,15 @@ use std::net::SocketAddr;
 pub fn init_metrics(addr: SocketAddr) {
     let builder = PrometheusBuilder::new()
         .with_http_listener(addr);
-    
-    builder.install().expect("failed to install Prometheus recorder");
-    tracing::info!("Prometheus metrics exporter started on {}", addr);
+
+    match builder.install() {
+        Ok(_) => {
+            tracing::info!("Prometheus metrics exporter started on {}", addr);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to start Prometheus metrics exporter on {}: {} (continuing without metrics)", addr, e);
+        }
+    }
 }
 
 /// Initializes the OpenTelemetry tracing provider and subscriber registry.
