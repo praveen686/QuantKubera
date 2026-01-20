@@ -67,8 +67,8 @@ cargo run -p kubera-backtest --bin optimize_aeon
 
 ## 📁 Configuration Files
 
-- **Production**: `paper.toml` (threshold = 0.38)
-- **Backtest**: `backtest.toml` (threshold = 0.38)
+- **Production**: `configs/paper.toml` (threshold = 0.38)
+- **Backtest**: `configs/backtest.toml` (threshold = 0.38)
 - **Optimizer**: `crates/kubera-backtest/src/bin/optimize_aeon.rs`
 
 ---

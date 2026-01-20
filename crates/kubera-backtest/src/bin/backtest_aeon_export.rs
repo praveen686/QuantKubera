@@ -17,8 +17,8 @@ use tracing::info;
 use std::fs;
 
 fn load_config() -> (AeonConfig, HydraConfig) {
-    let config_str = fs::read_to_string("backtest.toml")
-        .or_else(|_| fs::read_to_string("../../backtest.toml"))
+    let config_str = fs::read_to_string("configs/backtest.toml")
+        .or_else(|_| fs::read_to_string("../../configs/backtest.toml"))
         .unwrap_or_default();
     
     if config_str.is_empty() {

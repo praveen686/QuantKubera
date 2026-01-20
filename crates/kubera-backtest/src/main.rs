@@ -333,8 +333,8 @@ async fn main() -> anyhow::Result<()> {
     info!("═══════════════════════════════════════════");
 
     // Load config
-    let config_str = fs::read_to_string("../../backtest.toml").unwrap_or_else(|_| {
-        fs::read_to_string("backtest.toml").expect("Could not find backtest.toml")
+    let config_str = fs::read_to_string("configs/backtest.toml").unwrap_or_else(|_| {
+        fs::read_to_string("../../configs/backtest.toml").expect("Could not find configs/backtest.toml")
     });
     let config: Config = toml::from_str(&config_str).expect("Failed to parse backtest.toml");
     let b_config = config.backtest;

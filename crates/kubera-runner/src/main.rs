@@ -183,9 +183,9 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     let config_file = match mode {
-        ExecutionMode::Backtest => "backtest.toml",
-        ExecutionMode::Live => "live.toml",
-        ExecutionMode::Paper => "paper.toml",
+        ExecutionMode::Backtest => "configs/backtest.toml",
+        ExecutionMode::Live => "configs/live.toml",
+        ExecutionMode::Paper => "configs/paper.toml",
     };
 
     let config_str = fs::read_to_string(config_file).unwrap_or_else(|_| {
