@@ -3455,7 +3455,15 @@ impl HydraStrategy {
         // Position change with hysteresis
         let position_change = target_pos - self.position;
         let mut should_trade = position_change.abs() > self.config.position_hysteresis;
-        
+
+        // V2: Trade cooldown - minimum 50 ticks between trades to avoid commission churn
+        const MIN_TICKS_BETWEEN_TRADES: u64 = 50;
+        if self.tick_count - self.last_trade_tick < MIN_TICKS_BETWEEN_TRADES && self.last_trade_tick > 0 {
+            debug!("[HYDRA] Trade cooldown active ({} ticks since last trade)", self.tick_count - self.last_trade_tick);
+            self.is_processing = false;
+            return;
+        }
+
         if is_reversal && !should_trade {
             info!("[HYDRA] Trailing Alpha-Stop triggered (Reversal detected) - Closing position");
             target_pos = 0.0;

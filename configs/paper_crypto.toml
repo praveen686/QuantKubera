@@ -13,10 +13,15 @@ commission_model = "Linear"
 
 [strategy.hydra]
 venue = "BinanceFutures"
-learning_rate = 0.033
-zscore_action_threshold = 1.75
-position_hysteresis = 0.2
-lambda_risk = 0.5
-edge_hurdle_multiplier = 0.8
+learning_rate = 0.01
+zscore_action_threshold = 2.5
+position_hysteresis = 0.5
+lambda_risk = 0.7
+edge_hurdle_multiplier = 1.5
 slippage_bps = 0.2
 commission_bps = 0.8
+# Tuned for less frequent trading:
+# - zscore_action_threshold: 1.75 -> 2.5 (stronger signal required)
+# - position_hysteresis: 0.2 -> 0.5 (50% buffer before position change)
+# - edge_hurdle_multiplier: 0.8 -> 1.5 (higher edge requirement)
+# - learning_rate: 0.033 -> 0.01 (slower adaptation)
