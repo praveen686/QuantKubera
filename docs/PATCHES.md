@@ -10,8 +10,9 @@ This document tracks all patches applied to QuantKubera, their purpose, usage in
    - [Binance Cost-Aware Trade Gating](#1-binance-cost-aware-trade-gating)
    - [Circuit Breaker TUI & IV Surface Display](#2-circuit-breaker-tui--iv-surface-display)
    - [UniverseSpec WAL for Deterministic Replay](#3-universespec-wal-for-deterministic-replay)
+   - [Strategy R&D: Coherence Gate & MeanRev Fix](#4-strategy-rd-coherence-gate--meanrev-fix)
 2. [Planned Patches](#planned-patches)
-   - [Coherence Gate & Alpha Calibration](#coherence-gate--alpha-calibration)
+   - [Shadow Calibration](#shadow-calibration)
    - [Rank-Space Mean Reversion / Random Matrix Theory](#rank-space-mean-reversion--random-matrix-theory)
    - [Gamma Blast Strategy (Index Expiries)](#gamma-blast-strategy-index-expiries)
 3. [Patch Application Guide](#patch-application-guide)
@@ -173,41 +174,93 @@ if let Some(spec) = reader.read_universe_spec_v1()? {
 
 ---
 
+### 4. Strategy R&D: Coherence Gate & MeanRev Fix
+
+**Commit:** `818fcb5`
+**Date:** 2026-01-21
+**Status:** ✅ Applied
+
+#### Purpose
+Address expert signal cancellation and MeanRev saturation issues identified during paper trading. Adds coherence gating to require expert alignment before trading.
+
+#### Key Changes
+
+**A. Coherence Gate (`hydra.rs`):**
+- Added `coherence_min` config (default: 0.65)
+- Coherence = |net_signal| / sum(|expert_contrib|)
+- Skips trades when experts disagree (coherence < threshold)
+
+```rust
+let coherence = if abs_contrib_sum > 1e-9 {
+    (portfolio_signal.abs() / abs_contrib_sum).clamp(0.0, 1.0)
+} else { 0.0 };
+
+if coherence < self.config.coherence_min {
+    return;  // Experts disagree, skip trade
+}
+```
+
+**B. MeanRev Saturation Fix (`hydra.rs`):**
+- Replaced hard clamp with tanh() soft clipping
+- Reduced liquidity boost from 1.5 to 1.2
+- Added diagnostic logging
+
+```rust
+// Before: signal saturated at ~0.9 due to hard clamp
+self.signal = ((combined) * liquidity_mult).clamp(-1.0, 1.0);
+
+// After: soft clip preserves magnitude information
+self.signal = (combined * liquidity_mult).tanh();
+```
+
+**C. Edge Scale Multiplier:**
+- Added `edge_scale_mult` config (default: 1.0)
+- Allows controlled experiments with heuristic edge estimates
+
+**D. Simplified Cost Model:**
+- Removed deprecated Binance tuning fields
+- Cost model now: `total_cost = slippage_bps + commission_bps`
+- Required edge: `hurdle * total_cost` (no min_edge_bps)
+
+#### Configuration
+```toml
+[strategy.hydra]
+coherence_min = 0.65       # Require 65% expert alignment
+edge_scale_mult = 1.0      # No edge scaling (for experiments)
+edge_hurdle_multiplier = 2.5
+```
+
+#### Exchange Profile Defaults
+| Profile | coherence_min | Notes |
+|---------|--------------|-------|
+| BinanceSpot | 0.60 | Lower for more liquid markets |
+| BinanceFutures | 0.60 | Lower for more liquid markets |
+| ZerodhaFnO | 0.70 | Higher for options (lower churn) |
+| Default | 0.65 | Balanced default |
+
+#### Expected Behavior
+- Trades only execute when experts agree on direction
+- MeanRev signal now varies continuously (not stuck at 0.9)
+- Lower false signal rate due to coherence filtering
+- Diagnostic logs show: `[MEANREV] vwap_z=... signal=...`
+
+---
+
 ## Planned Patches
 
-### Coherence Gate & Alpha Calibration
+### Shadow Calibration
 
 **Status:** 🔜 Planned
 **Priority:** High
 
 #### Problem
-HYDRA experts frequently disagree, causing signal cancellation and weak net edge. The current "edge_bps" is a heuristic score conversion, not calibrated expected return.
+The current "edge_bps" is a heuristic score conversion (e.g., `25.0 * signal.abs()`), not calibrated to actual expected return.
 
 #### Proposed Changes
-
-**A. Coherence Gate**
-```rust
-// Per tick, compute:
-let net = weighted_signals.iter().sum();
-let abs_sum = weighted_signals.iter().map(|s| s.abs()).sum();
-let coherence = net.abs() / (abs_sum + 1e-9);  // [0, 1]
-
-// Gate rule:
-if coherence < 0.65 {
-    return None;  // Experts disagree, skip trade
-}
-```
-
-**B. MeanRev Expert Fix**
-- Log raw signal, z-score, and post-transform separately
-- Investigate why signal saturates at 0.900
-- Fix clipping/normalization if needed
-
-**C. Shadow Calibration**
 - Record all candidates (even rejected) with:
   - `net_signal`, `coherence`, `future_return_bps` over horizon H
 - Fit monotonic mapping: `E[return | signal, coherence]`
-- Replace heuristic `25.0 * signal.abs()` with calibrated edge
+- Replace heuristic edge with calibrated edge
 
 #### Instrumentation to Add
 ```
@@ -307,6 +360,7 @@ All patch ZIP files are stored in:
 |------|-------------|---------|
 | `QuantKubera-main/` | Base snapshot (no changes) | - |
 | `QuantKubera-universe-wal.patch.zip` | UniverseSpec WAL | ✅ |
+| `QuantKubera-strategy-rd-patch.zip` | Coherence Gate & MeanRev Fix | ✅ |
 
 ---
 

@@ -155,18 +155,12 @@ pub struct HydraConfig {
     pub autocorrelation_range_threshold: f64,
     /// Edge hurdle multiplier (e.g. 2.5 means edge > 2.5 * costs)
     pub edge_hurdle_multiplier: f64,
-
-    // ========== BINANCE TUNING PATCH ==========
-    /// Minimum edge in bps required to trade (hard floor)
-    pub min_edge_bps: f64,
-    /// Latency-induced slippage in bps (signal→fill drift)
-    pub latency_slippage_bps: f64,
-    /// Include half-spread in cost calculation
-    pub include_spread_in_cost: bool,
-    /// Minimum milliseconds between signals
-    pub min_ms_between_signals: i64,
-    /// Minimum milliseconds to hold a position
-    pub min_ms_hold: i64,
+    /// Minimum expert coherence required to trade (0.0 - 1.0)
+    /// Coherence = |net_signal| / sum(|expert_contrib|)
+    /// Higher values require experts to agree on direction
+    pub coherence_min: f64,
+    /// Multiplier for heuristic edge estimates (for calibration experiments)
+    pub edge_scale_mult: f64,
 }
 
 impl Default for HydraConfig {
@@ -207,13 +201,8 @@ impl Default for HydraConfig {
             hurst_range_threshold: 0.45,
             autocorrelation_range_threshold: -0.1,
             edge_hurdle_multiplier: 2.5, // Default to strict Masterpiece filter
-
-            // BINANCE TUNING PATCH defaults
-            min_edge_bps: 8.0,              // Minimum 8bps edge required
-            latency_slippage_bps: 5.0,      // Observed ~5bps signal→fill drift
-            include_spread_in_cost: true,
-            min_ms_between_signals: 5000,   // 5 seconds between signals
-            min_ms_hold: 5000,              // 5 seconds minimum hold
+            coherence_min: 0.65, // Require broad expert alignment
+            edge_scale_mult: 1.0, // No edge scaling by default
         }
     }
 }
@@ -228,56 +217,23 @@ impl HydraConfig {
                 self.commission_bps = 1.0; // 0.1% taker
                 self.position_hysteresis = 0.1;
                 self.zscore_action_threshold = 0.5;
+                self.coherence_min = 0.60;
             }
             ExchangeProfile::BinanceFutures => {
                 info!("[HYDRA] Calibrating for Binance Futures (Masterpiece Final)");
                 self.slippage_bps = 0.2;
-                self.commission_bps = 0.8; 
+                self.commission_bps = 0.8;
                 self.position_hysteresis = 0.4; // Medallion-grade alpha capture
-                self.zscore_action_threshold = 0.8; 
+                self.zscore_action_threshold = 0.8;
+                self.coherence_min = 0.60;
             }
             ExchangeProfile::ZerodhaFnO => {
-                info!("[HYDRA] Calibrating for Zerodha Indian F&O (Options-Optimized profile)");
-                // === COST STRUCTURE ===
-                // NSE F&O: ~0.03% brokerage + 0.01% STT + 0.05% other charges
-                self.slippage_bps = 1.5;  // Options have wider spreads
-                self.commission_bps = 4.0; // ~0.04% total costs (lower for index options)
-
-                // === SIGNAL THRESHOLDS ===
-                // Options decay quickly - need faster entry/exit
-                self.position_hysteresis = 0.3;  // Lower hysteresis for quicker response
-                self.zscore_action_threshold = 0.8;  // More sensitive to capture premium
-
-                // === VOLATILITY TARGETING ===
-                // Indian markets have higher intraday volatility
-                self.vol_target = 0.25;  // 25% annualized target
-                self.vol_high_threshold = 0.40;  // Higher threshold for India VIX spikes
-                self.vol_low_threshold = 0.12;  // Adjust for normal IV range
-
-                // === RISK MANAGEMENT ===
-                // Tighter drawdown limits for options (theta decay risk)
-                self.max_drawdown_pct = 8.0;  // Stricter 8% max drawdown
-                self.expert_quarantine_drawdown = 4.0;  // Quarantine at 4%
-                self.quarantine_cooldown_ticks = 300;  // Faster recovery allowed
-
-                // === POSITION SIZING ===
-                // Smaller positions due to options leverage
-                self.max_position_abs = 25.0;  // Reduced max position
-                self.max_position_per_expert = 8.0;  // Balanced expert contribution
-
-                // === EDGE REQUIREMENTS ===
-                // Options have better edge opportunities but higher costs
-                self.edge_hurdle_multiplier = 2.0;  // Slightly lower hurdle for options
-
-                // === REGIME DETECTION ===
-                // Tuned for Indian market characteristics
-                self.hurst_trend_threshold = 0.52;  // Lower for faster trend detection
-                self.trend_strength_threshold = 25.0;  // More sensitive to trends
-                self.cusum_threshold = 12.0;  // Faster event detection
-
-                // === LEARNING RATE ===
-                // Faster adaptation for expiry-driven dynamics
-                self.learning_rate = 0.08;  // Higher learning rate
+                info!("[HYDRA] Calibrating for Zerodha Indian F&O (Low Churn profile)");
+                self.slippage_bps = 0.5;
+                self.commission_bps = 6.0; // ~0.06% total costs
+                self.position_hysteresis = 1.0;
+                self.zscore_action_threshold = 1.2;
+                self.coherence_min = 0.70;
             }
             ExchangeProfile::Default => {}
         }
@@ -1199,10 +1155,19 @@ impl MeanRevExpert {
         };
 
         // Combine with liquidity vacuum boost
-        let liquidity_mult = if liquidity_vacuum { 1.5 } else { 1.0 };
+        // NOTE: hard clamping was saturating the signal (often ~0.9/1.0). We reduce the boost
+        // and apply a soft clip (tanh) to preserve magnitude information without saturation.
+        let liquidity_mult = if liquidity_vacuum { 1.2 } else { 1.0 };
 
-        // Weighted combination
-        self.signal = ((0.6 * vwap_signal + 0.4 * bb_signal) * liquidity_mult).clamp(-1.0, 1.0);
+        // Weighted combination (pre-boost)
+        let combined = 0.6 * vwap_signal + 0.4 * bb_signal;
+        let boosted = combined * liquidity_mult;
+        // Soft clip to [-1,1] without hard saturation
+        self.signal = boosted.tanh();
+
+        // Diagnostics for tuning (enable with RUST_LOG=kubera_core::hydra=debug)
+        debug!("[MEANREV] vwap_z={:.2} bb_z={:.2} vwap_sig={:.2} bb_sig={:.2} vacuum={} combined={:.2} boosted={:.2} signal={:.2}",
+               vwap_zscore, bb_zscore, vwap_signal, bb_signal, liquidity_vacuum, combined, boosted, self.signal);
     }
 }
 
@@ -3312,6 +3277,7 @@ impl HydraStrategy {
         // Aggregate signals using meta-allocator weights
         let mut portfolio_signal = 0.0;
         let mut weighted_edge = 0.0;
+        let mut abs_contrib_sum = 0.0;
         let mut best_intent: Option<ExpertIntent> = None;
         let mut max_weighted_signal = 0.0_f64;
 
@@ -3363,9 +3329,21 @@ impl HydraStrategy {
             }
 
             portfolio_signal += final_weighted_signal;
+            abs_contrib_sum += final_weighted_signal.abs();
 
             debug!("[HYDRA] {} raw={:.3} zscore={:.2} (w={:.3}, weighted={:.3}, aeon={:.2})",
                 intent.expert_id, intent.signal, zscore, weight, final_weighted_signal, self.aeon_bif_score);
+        }
+
+        // Apply global scaling to heuristic edge estimates (useful when calibrating offline)
+        weighted_edge *= self.config.edge_scale_mult;
+
+        // Coherence gate: require experts to be directionally aligned
+        let coherence = if abs_contrib_sum > 1e-9 { (portfolio_signal.abs() / abs_contrib_sum).clamp(0.0, 1.0) } else { 0.0 };
+        if coherence < self.config.coherence_min {
+            debug!("[HYDRA] Coherence {:.2} < min {:.2}, skipping", coherence, self.config.coherence_min);
+            self.is_processing = false;
+            return;
         }
 
         // Apply regime risk multiplier
@@ -3487,15 +3465,12 @@ impl HydraStrategy {
         // --- PORTFOLIO POSITION LIMIT ENFORCEMENT ---
         target_pos = target_pos.clamp(-self.config.max_position_abs, self.config.max_position_abs);
 
-        // ========== BINANCE TUNING: Enhanced cost model ==========
-        // Include latency slippage (observed ~5bps signal→fill drift)
-        let base_cost = self.config.slippage_bps + self.config.commission_bps + self.config.latency_slippage_bps;
-        // Note: spread estimation would require book tracking - use base cost for now
-        let total_cost = base_cost;
+        // Cost model: slippage + commission
+        let total_cost = self.config.slippage_bps + self.config.commission_bps;
 
-        // Required edge = max(min_edge_bps, hurdle * total_cost)
+        // Required edge = hurdle * total_cost
         let hurdle = self.config.edge_hurdle_multiplier;
-        let required_edge = self.config.min_edge_bps.max(total_cost * hurdle);
+        let required_edge = total_cost * hurdle;
 
         // ========== CANDIDATE LOGGING (for tuning analysis) ==========
         self.candidate_count += 1;
@@ -3549,18 +3524,6 @@ impl HydraStrategy {
             return;
         }
         self.passed_count += 1;
-
-        // ========== BINANCE TUNING: Time-based cooldown ==========
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        if self.config.min_ms_between_signals > 0 && self.last_signal_ts_ms > 0 {
-            let elapsed_ms = now_ms - self.last_signal_ts_ms;
-            if elapsed_ms < self.config.min_ms_between_signals {
-                debug!("[HYDRA] Signal cooldown active ({}ms < {}ms), skipping",
-                       elapsed_ms, self.config.min_ms_between_signals);
-                self.is_processing = false;
-                return;
-            }
-        }
 
         // --- MASTERPIECE: TRAILING ALPHA-STOP ---
         // If we are long but signal is strongly reversed, close position immediately
