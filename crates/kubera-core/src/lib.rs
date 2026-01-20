@@ -289,6 +289,15 @@ pub mod wal {
             Ok(())
         }
 
+        /// Writes metadata to the WAL (e.g., lot_sizes, instrument info).
+        /// Format: META:<key>:<value>
+        pub fn write_metadata(&mut self, data: &str) -> anyhow::Result<()> {
+            self.writer.write_all(b"META:")?;
+            self.writer.write_all(data.as_bytes())?;
+            self.writer.write_all(b"\n")?;
+            Ok(())
+        }
+
         /// Records a system health heartbeats or status updates.
         pub fn log_health(&mut self, event: &SystemHealthEvent) -> anyhow::Result<()> {
             let serialized = serde_json::to_vec(event)?;
@@ -327,11 +336,59 @@ pub mod wal {
             if bytes_read == 0 {
                 return Ok(None);
             }
-            if line.starts_with("ORDER:") {
+            // Skip ORDER and META lines
+            if line.starts_with("ORDER:") || line.starts_with("META:") {
                 return self.next_event();
             }
             let event: MarketEvent = serde_json::from_str(&line)?;
             Ok(Some(event))
+        }
+
+        /// Reads all metadata from the WAL file.
+        /// Returns a HashMap of metadata key -> value.
+        /// Call this at the beginning before reading events.
+        pub fn read_metadata(&mut self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+            use std::io::{BufRead, Seek, SeekFrom};
+
+            // Save current position
+            let pos = self.reader.stream_position()?;
+            // Seek to beginning
+            self.reader.seek(SeekFrom::Start(0))?;
+
+            let mut metadata = std::collections::HashMap::new();
+            let mut line = String::new();
+
+            loop {
+                line.clear();
+                let bytes_read = self.reader.read_line(&mut line)?;
+                if bytes_read == 0 {
+                    break;
+                }
+                if line.starts_with("META:") {
+                    let content = line[5..].trim();
+                    if let Some(colon_pos) = content.find(':') {
+                        let key = &content[..colon_pos];
+                        let value = &content[colon_pos + 1..];
+                        metadata.insert(key.to_string(), value.to_string());
+                    }
+                }
+            }
+
+            // Restore position
+            self.reader.seek(SeekFrom::Start(pos))?;
+            Ok(metadata)
+        }
+
+        /// Reads lot sizes from WAL metadata.
+        /// Returns HashMap<Symbol, LotSize>.
+        pub fn read_lot_sizes(&mut self) -> anyhow::Result<std::collections::HashMap<String, u32>> {
+            let metadata = self.read_metadata()?;
+            if let Some(lot_sizes_json) = metadata.get("lot_sizes") {
+                let lot_sizes: std::collections::HashMap<String, u32> = serde_json::from_str(lot_sizes_json)?;
+                Ok(lot_sizes)
+            } else {
+                Ok(std::collections::HashMap::new())
+            }
         }
 
         /// Retrieves the next command/response record.

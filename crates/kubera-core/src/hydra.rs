@@ -3078,6 +3078,10 @@ pub struct HydraStrategy {
     option_type: Option<OptionType>,
     /// OPTIONS: Risk-free rate for Black-Scholes (default 6.5% for India)
     risk_free_rate: f64,
+    /// NSE: Per-symbol lot sizes for rounding quantities (missing = no rounding)
+    lot_sizes: HashMap<String, u32>,
+    /// NSE: Default lot size for unknown symbols (0 = no rounding)
+    default_lot_size: u32,
 }
 
 impl HydraStrategy {
@@ -3130,7 +3134,26 @@ impl HydraStrategy {
             option_time_to_expiry: None,
             option_type: None,
             risk_free_rate: 0.065, // India RBI repo rate ~6.5%
+            lot_sizes: HashMap::new(),
+            default_lot_size: 0, // 0 = no rounding (crypto), set via set_lot_size for NSE
         }
+    }
+
+    /// Set lot size for a specific symbol (e.g., NIFTY=75, BANKNIFTY=30)
+    pub fn set_lot_size_for_symbol(&mut self, symbol: &str, lot_size: u32) {
+        self.lot_sizes.insert(symbol.to_string(), lot_size);
+        info!("[HYDRA] Lot size set to {} for {}", lot_size, symbol);
+    }
+
+    /// Set default lot size for NSE F&O instruments (used when symbol-specific lot size not found)
+    pub fn set_lot_size(&mut self, lot_size: u32) {
+        self.default_lot_size = lot_size;
+        info!("[HYDRA] Default lot size set to {} for NSE F&O", lot_size);
+    }
+
+    /// Get lot size for a symbol (returns symbol-specific or default)
+    fn get_lot_size_for_symbol(&self, symbol: &str) -> u32 {
+        *self.lot_sizes.get(symbol).unwrap_or(&self.default_lot_size)
     }
 
     /// Enable Greeks risk management for options trading
@@ -3441,10 +3464,23 @@ impl HydraStrategy {
 
         if should_trade {
             let side = if target_pos > self.position { Side::Buy } else { Side::Sell };
-            let qty = (target_pos - self.position).abs();
+            let raw_qty = (target_pos - self.position).abs();
 
-            // V2: Minimum quantity to prevent signal spam
-            if qty < 0.01 {
+            // Get lot size for this symbol (per-symbol or default)
+            let lot_size = self.get_lot_size_for_symbol(symbol);
+
+            // Round to lot size for NSE F&O instruments
+            let qty = if lot_size > 0 {
+                let lots = (raw_qty / lot_size as f64).round().max(1.0);
+                lots * lot_size as f64
+            } else {
+                raw_qty
+            };
+
+            // V2: Minimum quantity to prevent signal spam (1 lot for NSE, 0.01 for crypto)
+            let min_qty = if lot_size > 0 { lot_size as f64 } else { 0.01 };
+            if raw_qty < min_qty * 0.5 {
+                // Not even half a lot, skip
                 self.is_processing = false;
                 return;
             }

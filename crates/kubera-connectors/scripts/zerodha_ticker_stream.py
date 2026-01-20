@@ -10,7 +10,18 @@ Usage:
   python3 zerodha_ticker_stream.py --tokens 256265,260105
 
 Output (one JSON object per line):
+  First line is metadata with instrument info:
   {
+    "type": "metadata",
+    "instruments": {
+      "NIFTY24JANFUT": {"token": 256265, "lot_size": 65, "exchange": "NFO"},
+      ...
+    }
+  }
+
+  Subsequent lines are tick data:
+  {
+    "type": "tick",
     "ts_ns": 173735...,
     "instrument_token": 256265,
     "tradingsymbol": "NIFTY24JANFUT",
@@ -22,6 +33,7 @@ Notes:
   - Subscribes in FULL mode so that best-5 depth is available.
   - If depth is not present for a tick, it is omitted (null).
   - Builds token->symbol mapping at startup from instruments API.
+  - Outputs lot_size per instrument for NSE F&O position sizing.
 """
 
 from __future__ import annotations
@@ -39,10 +51,16 @@ def _now_ns() -> int:
     return time.time_ns()
 
 
-def build_token_symbol_map(kite, tokens: list[int]) -> Dict[int, str]:
-    """Build instrument_token -> tradingsymbol mapping from Zerodha instruments."""
+def build_instrument_info(kite, tokens: list[int]) -> tuple[Dict[int, str], Dict[str, dict]]:
+    """Build instrument mappings from Zerodha instruments API.
+
+    Returns:
+        token_to_symbol: Dict[int, str] - token -> tradingsymbol mapping
+        instrument_info: Dict[str, dict] - symbol -> {token, lot_size, exchange} mapping
+    """
     token_set = set(tokens)
-    mapping: Dict[int, str] = {}
+    token_to_symbol: Dict[int, str] = {}
+    instrument_info: Dict[str, dict] = {}
 
     # Fetch instruments from all relevant exchanges
     for exchange in ["NFO", "NSE", "BFO", "BSE"]:
@@ -51,20 +69,29 @@ def build_token_symbol_map(kite, tokens: list[int]) -> Dict[int, str]:
             for inst in instruments:
                 token = inst.get("instrument_token")
                 if token in token_set:
-                    mapping[token] = inst.get("tradingsymbol", "")
+                    symbol = inst.get("tradingsymbol", "")
+                    lot_size = inst.get("lot_size", 1)
+                    token_to_symbol[token] = symbol
+                    instrument_info[symbol] = {
+                        "token": token,
+                        "lot_size": lot_size,
+                        "exchange": exchange,
+                    }
             # Early exit if we found all tokens
-            if len(mapping) == len(token_set):
+            if len(token_to_symbol) == len(token_set):
                 break
         except Exception as e:
             print(f"Warning: failed to fetch {exchange} instruments: {e}", file=sys.stderr)
 
     # Log any missing mappings
     for token in tokens:
-        if token not in mapping:
+        if token not in token_to_symbol:
             print(f"Warning: no symbol found for token {token}", file=sys.stderr)
-            mapping[token] = f"TOKEN_{token}"
+            symbol = f"TOKEN_{token}"
+            token_to_symbol[token] = symbol
+            instrument_info[symbol] = {"token": token, "lot_size": 1, "exchange": "UNKNOWN"}
 
-    return mapping
+    return token_to_symbol, instrument_info
 
 
 def main() -> int:
@@ -96,11 +123,20 @@ def main() -> int:
         print("No tokens provided", file=sys.stderr)
         return 4
 
-    # Build token -> symbol mapping at startup
+    # Build token -> symbol mapping and instrument info at startup
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
-    token_to_symbol = build_token_symbol_map(kite, tokens)
+    token_to_symbol, instrument_info = build_instrument_info(kite, tokens)
     print(f"Token mapping: {token_to_symbol}", file=sys.stderr)
+    print(f"Instrument info: {instrument_info}", file=sys.stderr)
+
+    # Output metadata JSON as first line (for Rust runner to parse lot sizes)
+    metadata = {
+        "type": "metadata",
+        "instruments": instrument_info,
+    }
+    sys.stdout.write(json.dumps(metadata) + "\n")
+    sys.stdout.flush()
 
     kws = KiteTicker(api_key, access_token)
 
@@ -116,6 +152,7 @@ def main() -> int:
             symbol = t.get("tradingsymbol") or token_to_symbol.get(inst_token, "")
 
             out = {
+                "type": "tick",
                 "ts_ns": ts_ns,
                 "instrument_token": inst_token,
                 "tradingsymbol": symbol,

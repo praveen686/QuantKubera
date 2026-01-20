@@ -1,5 +1,10 @@
+[backtest]
+wal_path = "zerodha_fut.wal"
+initial_equity = 1000000.0
+slippage_bps = 0.5
+
 [mode]
-symbols = ["BTCUSDT"]
+symbols = ["NIFTY26JANFUT", "BANKNIFTY26JANFUT"]
 
 [risk]
 max_order_value_usd = 100000.0

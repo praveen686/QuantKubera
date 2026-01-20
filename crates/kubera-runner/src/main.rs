@@ -39,6 +39,104 @@ use tokio::process::Command;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde::Deserialize;
+use kubera_options::OptionType;
+
+/// Parse NSE option symbol to extract strike, expiry, and option type
+/// Example: "NIFTY2612025450CE" -> (25450.0, 2026-01-20, Call)
+fn parse_nse_option_symbol(symbol: &str) -> Option<(f64, chrono::NaiveDate, OptionType)> {
+    // Pattern: {INDEX}{YY}{MM}{DD}{STRIKE}{CE/PE}
+    // Example: NIFTY2612025450CE
+
+    let symbol = symbol.to_uppercase();
+
+    // Extract option type (last 2 chars)
+    if symbol.len() < 10 {
+        return None;
+    }
+
+    let opt_type_str = &symbol[symbol.len()-2..];
+    let option_type = match opt_type_str {
+        "CE" => OptionType::Call,
+        "PE" => OptionType::Put,
+        _ => return None,
+    };
+
+    // Find where the index name ends (first digit)
+    let digit_start = symbol.chars().position(|c| c.is_ascii_digit())?;
+    let _index_name = &symbol[..digit_start];
+    let rest = &symbol[digit_start..symbol.len()-2]; // Remove CE/PE
+
+    // Parse YYMMDDSSSSS (year, month, day, strike)
+    if rest.len() < 7 {
+        return None;
+    }
+
+    let yy: i32 = rest[0..2].parse().ok()?;
+    let mm: u32 = rest[2..4].parse().ok()?;
+    let dd: u32 = rest[4..6].parse().ok()?;
+    let strike: f64 = rest[6..].parse().ok()?;
+
+    let year = 2000 + yy;
+    let expiry = chrono::NaiveDate::from_ymd_opt(year, mm, dd)?;
+
+    Some((strike, expiry, option_type))
+}
+
+/// Calculate time to expiry in years
+fn time_to_expiry_years(expiry: chrono::NaiveDate) -> f64 {
+    let today = chrono::Utc::now().date_naive();
+    let days = (expiry - today).num_days();
+    (days.max(0) as f64) / 365.0
+}
+
+/// Get NSE lot size for a given symbol
+/// Returns 0 for non-NSE symbols (crypto, etc.)
+///
+/// NSE F&O lot sizes (as of Jan 2025):
+/// - NIFTY: 65 units/lot (options)
+/// - BANKNIFTY: 30 units/lot
+/// - FINNIFTY: 25 units/lot
+/// - MIDCPNIFTY: 50 units/lot
+/// - SENSEX (BSE): 10 units/lot
+/// - BANKEX (BSE): 15 units/lot
+fn get_nse_lot_size(symbol: &str) -> u32 {
+    let symbol_upper = symbol.to_uppercase();
+
+    // NIFTY variants (options and futures) - NOT NIFTYBANK/NIFTYIT
+    if symbol_upper.starts_with("NIFTY") && !symbol_upper.starts_with("NIFTYBANK") && !symbol_upper.starts_with("NIFTYIT") {
+        // NIFTY lot size: 65 units
+        return 65;
+    }
+
+    // BANKNIFTY variants
+    if symbol_upper.starts_with("BANKNIFTY") {
+        // BANKNIFTY lot size: 30 units
+        return 30;
+    }
+
+    // FINNIFTY
+    if symbol_upper.starts_with("FINNIFTY") {
+        return 25;
+    }
+
+    // MIDCPNIFTY
+    if symbol_upper.starts_with("MIDCPNIFTY") {
+        return 50;
+    }
+
+    // SENSEX (BSE)
+    if symbol_upper.starts_with("SENSEX") {
+        return 10;
+    }
+
+    // BANKEX (BSE)
+    if symbol_upper.starts_with("BANKEX") {
+        return 15;
+    }
+
+    // Default: 0 means no lot rounding (crypto, forex, etc.)
+    0
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct StrategyConfig {
@@ -344,7 +442,28 @@ async fn async_main() -> anyhow::Result<()> {
         let wal_file = args.wal_file.clone();
         let is_headless = args.headless;
         let state_report = app_state.clone();
-        
+
+        // Read lot sizes from WAL metadata (if available)
+        let wal_lot_sizes: std::collections::HashMap<String, u32> = {
+            use kubera_core::wal::WalReader;
+            if let Ok(mut reader) = WalReader::new(&wal_file) {
+                match reader.read_lot_sizes() {
+                    Ok(lot_sizes) => {
+                        if !lot_sizes.is_empty() {
+                            info!("[BACKTEST] Loaded lot sizes from WAL metadata: {:?}", lot_sizes);
+                        }
+                        lot_sizes
+                    }
+                    Err(e) => {
+                        warn!("[BACKTEST] Failed to read lot sizes from WAL: {}", e);
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            }
+        };
+
         tokio::spawn(async move {
             use kubera_core::wal::WalReader;
             info!("Starting backtest replay from {}", wal_file);
@@ -355,7 +474,7 @@ async fn async_main() -> anyhow::Result<()> {
                     count += 1;
                 }
                 info!("Backtest replay complete. Processed {} events.", count);
-                
+
                 if is_headless {
                     // Give some time for the last trades to be processed
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -370,19 +489,54 @@ async fn async_main() -> anyhow::Result<()> {
                 error!("Failed to open WAL file: {}", wal_file);
             }
         });
-        
+
         // BACKTEST: Spawn dedicated HYDRA strategy runner
         let bus_backtest_strat = bus.clone();
         let mut backtest_market_rx = bus_backtest_strat.subscribe_market();
         let hydra_config = config.strategy.as_ref()
             .and_then(|s| s.hydra.clone());
         let config_backtest = config.clone();
+        let backtest_symbols = config.mode.symbols.clone();
+        let backtest_lot_sizes = wal_lot_sizes; // Move into async block
         tokio::spawn(async move {
             let mut strategy: Box<dyn Strategy> = if std::env::args().any(|a| a == "--aeon") {
                 let aeon_cfg = if let Some(sc) = &config_backtest.strategy { sc.aeon.clone().unwrap_or_default() } else { kubera_core::aeon::AeonConfig::default() };
                 let hydra_cfg = if let Some(sc) = &config_backtest.strategy { sc.hydra.clone().unwrap_or_default() } else { kubera_core::hydra::HydraConfig::default() };
                 info!("[BACKTEST] Initializing AEON FLAGSHIP strategy");
                 Box::new(kubera_core::AeonStrategy::new(aeon_cfg, hydra_cfg))
+            } else if std::env::args().any(|a| a == "--hydra") {
+                let mut hydra = if let Some(cfg) = hydra_config {
+                    info!("[BACKTEST] Initializing HYDRA with custom config from TOML");
+                    kubera_core::HydraStrategy::with_config(cfg)
+                } else {
+                    kubera_core::HydraStrategy::new()
+                };
+
+                // Configure lot sizes: prefer WAL metadata, fallback to hardcoded
+                for symbol in &backtest_symbols {
+                    let lot_size = backtest_lot_sizes
+                        .get(symbol)
+                        .copied()
+                        .unwrap_or_else(|| get_nse_lot_size(symbol));
+                    if lot_size > 0 {
+                        hydra.set_lot_size_for_symbol(symbol, lot_size);
+                    }
+                }
+
+                // Configure option params for first symbol (if it's an option)
+                if let Some(first_symbol) = backtest_symbols.first() {
+                    if let Some((strike, expiry, opt_type)) = parse_nse_option_symbol(first_symbol) {
+                        let tte = time_to_expiry_years(expiry);
+                        info!(
+                            symbol = %first_symbol, strike = strike, expiry = %expiry,
+                            tte_days = %(tte * 365.0), opt_type = ?opt_type,
+                            "[BACKTEST] HYDRA configured with real option params for B-S Greeks"
+                        );
+                        hydra.set_option_params(strike, tte, opt_type);
+                    }
+                }
+
+                Box::new(hydra)
             } else if let Some(cfg) = hydra_config {
                 info!("[BACKTEST] Initializing HYDRA with custom config from TOML");
                 Box::new(kubera_core::HydraStrategy::with_config(cfg))
@@ -591,12 +745,36 @@ async fn async_main() -> anyhow::Result<()> {
                     info!(symbol = %symbol_name, "Initializing AEON FLAGSHIP strategy");
                     Box::new(kubera_core::AeonStrategy::new(aeon_cfg, hydra_cfg))
                 } else if std::env::args().any(|a| a == "--hydra") {
-                    if let Some(cfg) = hydra_config {
+                    let mut hydra = if let Some(cfg) = hydra_config {
                         info!(symbol = %symbol_name, "Initializing HYDRA with custom config from TOML");
-                        Box::new(kubera_core::HydraStrategy::with_config(cfg))
+                        kubera_core::HydraStrategy::with_config(cfg)
                     } else {
-                        Box::new(kubera_core::HydraStrategy::new())
+                        kubera_core::HydraStrategy::new()
+                    };
+
+                    // Configure option params for real Black-Scholes Greeks
+                    if let Some((strike, expiry, opt_type)) = parse_nse_option_symbol(&symbol_name) {
+                        let tte = time_to_expiry_years(expiry);
+                        info!(
+                            symbol = %symbol_name,
+                            strike = strike,
+                            expiry = %expiry,
+                            tte_days = %(tte * 365.0),
+                            opt_type = ?opt_type,
+                            "Configured HYDRA with real option params for B-S Greeks"
+                        );
+                        hydra.set_option_params(strike, tte, opt_type);
+                    } else {
+                        warn!(symbol = %symbol_name, "Could not parse option params - using crude Greeks estimates");
                     }
+
+                    // Configure NSE lot size for proper quantity rounding
+                    let lot_size = get_nse_lot_size(&symbol_name);
+                    if lot_size > 0 {
+                        hydra.set_lot_size_for_symbol(&symbol_name, lot_size);
+                    }
+
+                    Box::new(hydra)
                 } else if symbol_name == "BTCUSDT" || symbol_name == "ETHUSDT" {
                     Box::new(kubera_core::OrasStrategy::new())
                 } else {

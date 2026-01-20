@@ -35,14 +35,39 @@ struct DepthMsg {
 }
 
 #[derive(Debug, Deserialize)]
+struct InstrumentInfo {
+    token: i64,
+    lot_size: u32,
+    exchange: String,
+}
+
+/// Metadata message sent at startup by the Python sidecar
+#[derive(Debug, Deserialize)]
+struct MetadataMsg {
+    #[serde(rename = "type")]
+    msg_type: String,
+    instruments: HashMap<String, InstrumentInfo>,
+}
+
+/// Tick message for market data
+#[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct TickMsg {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
     /// Unix epoch in ns (sidecar computes from exchange timestamp or local time).
     ts_ns: i64,
     instrument_token: i64,
     tradingsymbol: String,
     last_price: Option<f64>,
     depth: Option<DepthMsg>,
+}
+
+/// Generic message to detect type
+#[derive(Debug, Deserialize)]
+struct GenericMsg {
+    #[serde(rename = "type")]
+    msg_type: String,
 }
 
 fn parse_arg(flag: &str, args: &[String]) -> Option<String> {
@@ -164,7 +189,10 @@ fn main() -> Result<()> {
     let mut latest: HashMap<String, L2Snapshot> = HashMap::new();
     // track which symbols have emitted their first snapshot (arming point)
     let mut armed: HashMap<String, bool> = HashMap::new();
+    // lot sizes per symbol (from metadata)
+    let mut lot_sizes: HashMap<String, u32> = HashMap::new();
     let mut update_id: u64 = 1;
+    let mut metadata_received = false;
 
     let start = Instant::now();
     let mut last_periodic = Instant::now();
@@ -184,13 +212,51 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let msg: TickMsg = match serde_json::from_str(&line) {
+        // First, detect message type
+        let generic: GenericMsg = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("[record_zerodha_wal_l2] bad json (skipping): {} | {}", e, line);
                 continue;
             }
         };
+
+        // Handle metadata message (first line from sidecar)
+        if generic.msg_type == "metadata" {
+            let meta: MetadataMsg = serde_json::from_str(&line)?;
+            for (symbol, info) in &meta.instruments {
+                lot_sizes.insert(symbol.clone(), info.lot_size);
+                eprintln!(
+                    "[record_zerodha_wal_l2] {} lot_size={} exchange={}",
+                    symbol, info.lot_size, info.exchange
+                );
+            }
+            metadata_received = true;
+
+            // Write lot sizes to WAL as a comment/metadata line
+            // Format: #META:lot_sizes:{"SYMBOL":lot_size,...}
+            let lot_sizes_json = serde_json::to_string(&lot_sizes)?;
+            wal.write_metadata(&format!("lot_sizes:{}", lot_sizes_json))?;
+            continue;
+        }
+
+        // Handle tick message
+        if generic.msg_type != "tick" {
+            eprintln!("[record_zerodha_wal_l2] unknown message type: {}", generic.msg_type);
+            continue;
+        }
+
+        let msg: TickMsg = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[record_zerodha_wal_l2] bad tick json (skipping): {} | {}", e, line);
+                continue;
+            }
+        };
+
+        if !metadata_received {
+            eprintln!("[record_zerodha_wal_l2] warning: received tick before metadata");
+        }
 
         let now = Utc::now();
         let symbol = msg.tradingsymbol.clone();
