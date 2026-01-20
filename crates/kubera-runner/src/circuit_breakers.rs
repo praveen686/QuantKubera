@@ -505,6 +505,52 @@ impl TradingCircuitBreakers {
     pub fn trip_count(&self) -> u64 {
         self.trip_count.load(Ordering::Relaxed)
     }
+
+    /// Get current signal rate limiter availability (tokens remaining)
+    pub fn signal_rate_available(&self) -> f64 {
+        self.signal_limiter.available()
+    }
+
+    /// Get current order rate limiter availability (tokens remaining)
+    pub fn order_rate_available(&self) -> f64 {
+        self.order_limiter.available()
+    }
+
+    /// Get current p99 latency if available
+    pub fn current_latency_p99(&self) -> Option<f64> {
+        self.latency_breaker.current_percentile_latency()
+    }
+
+    /// Get detailed status for TUI display
+    pub fn detailed_status(&self, current_equity: f64) -> CircuitBreakerStatus {
+        CircuitBreakerStatus {
+            is_tripped: self.is_any_tripped(),
+            kill_switch_active: self.kill_switch.load(Ordering::Relaxed),
+            latency_tripped: self.latency_breaker.is_tripped(),
+            order_flow_tripped: self.order_flow.is_tripped(),
+            drawdown_tripped: self.drawdown_breaker.is_tripped(),
+            signal_tokens: self.signal_limiter.available(),
+            order_tokens: self.order_limiter.available(),
+            p99_latency_ms: self.latency_breaker.current_percentile_latency(),
+            current_drawdown_pct: self.drawdown_breaker.current_drawdown_pct(current_equity),
+            trip_count: self.trip_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Detailed circuit breaker status for display
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerStatus {
+    pub is_tripped: bool,
+    pub kill_switch_active: bool,
+    pub latency_tripped: bool,
+    pub order_flow_tripped: bool,
+    pub drawdown_tripped: bool,
+    pub signal_tokens: f64,
+    pub order_tokens: f64,
+    pub p99_latency_ms: Option<f64>,
+    pub current_drawdown_pct: f64,
+    pub trip_count: u64,
 }
 
 #[cfg(test)]

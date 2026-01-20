@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod web_server;
 mod circuit_breakers;
 use web_server::{WebMessage, ServerState};
-use circuit_breakers::TradingCircuitBreakers;
+use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
 use tokio::time::Duration;
 use uuid::Uuid;
 use chrono::Utc;
@@ -908,7 +908,6 @@ async fn async_main() -> anyhow::Result<()> {
                                         );
                                     }
                                 }
-                                _ => {}
                             }
 
                             if panic_count >= MAX_PANICS {
@@ -1103,6 +1102,10 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
                 Ok(market) = market_rx_exec.recv() => {
+                    // Measure processing latency (exchange_time -> now)
+                    let processing_start = std::time::Instant::now();
+                    let exchange_latency_ms = (Utc::now() - market.exchange_time).num_milliseconds() as f64;
+
                     // Handle both Tick and Trade events for mark-to-market
                     let price = match &market.payload {
                         MarketPayload::Tick { price, .. } => Some(*price),
@@ -1118,9 +1121,12 @@ async fn async_main() -> anyhow::Result<()> {
                         // Update metrics equity with market timestamp for proper Sharpe calculation in backtest
                         state.metrics.update_equity_with_timestamp(equity, market.exchange_time);
 
-                        // === UPDATE CIRCUIT BREAKER DRAWDOWN MONITOR ===
+                        // === UPDATE CIRCUIT BREAKER MONITORS ===
                         if let Some(ref mut cb) = state.circuit_breakers {
                             cb.update_equity(equity);
+                            // Record end-to-end latency for circuit breaker monitoring
+                            let total_latency_ms = processing_start.elapsed().as_secs_f64() * 1000.0 + exchange_latency_ms.max(0.0);
+                            cb.record_latency(total_latency_ms);
                         }
                     }
 
@@ -1204,6 +1210,32 @@ async fn async_main() -> anyhow::Result<()> {
                         println!("  Trades:       {:>12}  |  Expectancy:   {:>12.2}", snapshot.total_trades, snapshot.expectancy);
                         println!("  Avg Win:      {:>12.2}  |  Avg Loss:     {:>12.2}", snapshot.avg_win, snapshot.avg_loss);
                         println!("  Kelly %:      {:>11.2}%  |  VaR (95%):    {:>12.2}", snapshot.kelly_fraction * 100.0, snapshot.var_95);
+
+                        // IV Surface info (if options data available)
+                        if let Some(ref surface) = state.iv_surface {
+                            let term_structure = surface.term_structure();
+                            if !term_structure.is_empty() {
+                                println!("  ─────────────────────────────────────────────────────────────");
+                                println!("  IV SURFACE ({}) | Spot: {:.2}", surface.underlying, surface.spot_price);
+                                let contango = if surface.is_contango() { "Contango" } else { "Backwardation" };
+                                println!("  Term Structure: {} | Expiries: {}", contango, term_structure.len());
+                                for (expiry, iv) in term_structure.iter().take(3) {
+                                    println!("    {} ATM IV: {:.2}%", expiry, iv * 100.0);
+                                }
+                            }
+                        }
+
+                        // Circuit Breaker status summary
+                        if let Some(ref cb) = state.circuit_breakers {
+                            let cb_summary = cb.status_summary(state.equity);
+                            let latency_info = cb.current_latency_p99()
+                                .map(|l| format!("{:.1}ms", l))
+                                .unwrap_or_else(|| "N/A".to_string());
+                            println!("  ─────────────────────────────────────────────────────────────");
+                            println!("  CIRCUIT BREAKERS: {} | p99 Latency: {}", cb_summary, latency_info);
+                            println!("  Rate Limits: Sig={:.0} Ord={:.0} | Trips: {}",
+                                cb.signal_rate_available(), cb.order_rate_available(), cb.trip_count());
+                        }
                         println!("───────────────────────────────────────────────────────────────\n");
 
                         // Export to Prometheus
@@ -1386,33 +1418,77 @@ async fn async_main() -> anyhow::Result<()> {
 
             let right_mid_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+                .constraints([Constraint::Percentage(35), Constraint::Percentage(35), Constraint::Percentage(30)].as_ref())
                 .split(mid_chunks[1]);
 
-            let portfolio_rows = vec![
+            let mut portfolio_rows = vec![
                 Row::new(vec![Cell::from("Equity"), Cell::from(format!("{:.2}", state.equity))]),
                 Row::new(vec![Cell::from("Realized PnL"), Cell::from(format!("{:.2}", state.realized_pnl))]),
                 Row::new(vec![Cell::from("Unrealized"), Cell::from(format!("{:.2}", state.equity - state.realized_pnl - args.initial_capital))]),
-                Row::new(vec![Cell::from("Peak Equity"), Cell::from(format!("{:.2}", snapshot.peak_equity))]),
             ];
+
+            // Add IV Surface info if available (for options trading)
+            if let Some(ref surface) = state.iv_surface {
+                let term_structure = surface.term_structure();
+                if let Some((expiry, atm_iv)) = term_structure.first() {
+                    let iv_color = if *atm_iv > 0.25 { Color::Red } else if *atm_iv > 0.15 { Color::Yellow } else { Color::Green };
+                    portfolio_rows.push(Row::new(vec![
+                        Cell::from(format!("ATM IV {}", expiry.format("%d%b"))),
+                        Cell::from(format!("{:.1}%", atm_iv * 100.0)).style(Style::default().fg(iv_color))
+                    ]));
+                }
+            } else {
+                portfolio_rows.push(Row::new(vec![Cell::from("Peak Equity"), Cell::from(format!("{:.2}", snapshot.peak_equity))]));
+            }
+
             let portfolio_table = Table::new(portfolio_rows, [Constraint::Percentage(50), Constraint::Percentage(50)])
                 .block(Block::default().borders(Borders::ALL).title("Portfolio"))
                 .header(Row::new(vec!["Metric", "Value"]).style(Style::default().add_modifier(Modifier::BOLD)));
             f.render_widget(portfolio_table, right_mid_chunks[0]);
 
+            // Circuit Breaker Status Panel
+            let cb_status: Option<CircuitBreakerStatus> = state.circuit_breakers.as_ref().map(|cb| cb.detailed_status(state.equity));
+            let cb_rows = if let Some(ref cbs) = cb_status {
+                // Build status indicators
+                let mut trip_reasons: Vec<&str> = Vec::new();
+                if cbs.kill_switch_active { trip_reasons.push("KILL"); }
+                if cbs.latency_tripped { trip_reasons.push("LAT"); }
+                if cbs.order_flow_tripped { trip_reasons.push("FLOW"); }
+                if cbs.drawdown_tripped { trip_reasons.push("DD"); }
+
+                let status_color = if cbs.is_tripped { Color::Red } else { Color::Green };
+                let status_text = if cbs.is_tripped {
+                    format!("TRIPPED: {}", trip_reasons.join(","))
+                } else {
+                    "OK".to_string()
+                };
+                let latency_text = cbs.p99_latency_ms.map(|l| format!("{:.1}ms", l)).unwrap_or_else(|| "N/A".to_string());
+                vec![
+                    Row::new(vec![
+                        Cell::from("Status"),
+                        Cell::from(status_text).style(Style::default().fg(status_color))
+                    ]),
+                    Row::new(vec![Cell::from("p99 Latency"), Cell::from(latency_text)]),
+                    Row::new(vec![Cell::from("Drawdown"), Cell::from(format!("{:.2}%", cbs.current_drawdown_pct))]),
+                    Row::new(vec![Cell::from("Sig/Ord Tokens"), Cell::from(format!("{:.0}/{:.0}", cbs.signal_tokens, cbs.order_tokens))]),
+                    Row::new(vec![Cell::from("Trip Count"), Cell::from(format!("{}", cbs.trip_count))]),
+                ]
+            } else {
+                vec![Row::new(vec![Cell::from("Disabled"), Cell::from("Backtest mode")])]
+            };
+            let cb_table = Table::new(cb_rows, [Constraint::Percentage(50), Constraint::Percentage(50)])
+                .block(Block::default().borders(Borders::ALL).title("Circuit Breakers"));
+            f.render_widget(cb_table, right_mid_chunks[1]);
+
             let actions_text = vec![
-                "Hotkeys:",
-                " 's' - Toggle BTC Strategy",
-                " 't' - Toggle ETH Strategy",
-                " 'n' - Toggle NIFTY Strategy",
-                " 'k' - Kill Switch",
-                " 'm' - Log Metrics Report",
-                " 'q' - Quit",
+                " 's' BTC | 't' ETH | 'n' NIFTY",
+                " 'k' Kill | 'r' Reset CB",
+                " 'm' Log | 'q' Quit",
             ];
             let actions_items: Vec<ListItem> = actions_text.iter().map(|s| ListItem::new(*s)).collect();
             let actions = List::new(actions_items)
-                .block(Block::default().borders(Borders::ALL).title("Actions"));
-            f.render_widget(actions, right_mid_chunks[1]);
+                .block(Block::default().borders(Borders::ALL).title("Hotkeys"));
+            f.render_widget(actions, right_mid_chunks[2]);
 
             // Order Log
             let log_items: Vec<ListItem> = state.order_log.iter().rev()
@@ -1460,6 +1536,19 @@ async fn async_main() -> anyhow::Result<()> {
                         let state = app_state.lock().unwrap();
                         let report = state.metrics.snapshot().detailed_report();
                         tracing::info!("{}", report);
+                    }
+                    KeyCode::Char('r') => {
+                        // Reset all circuit breakers
+                        let mut state = app_state.lock().unwrap();
+                        let current_equity = state.equity;
+                        let has_cb = state.circuit_breakers.is_some();
+                        if let Some(ref mut cb) = state.circuit_breakers {
+                            cb.reset_all(current_equity);
+                        }
+                        if has_cb {
+                            state.order_log.push(format!("[{}] Circuit breakers RESET", Utc::now().format("%H:%M:%S")));
+                            if state.order_log.len() > 10 { state.order_log.remove(0); }
+                        }
                     }
                     KeyCode::Char('b') => {
                         let bus_pub = bus.clone();

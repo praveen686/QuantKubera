@@ -224,6 +224,21 @@ fn main() -> Result<()> {
         // Handle metadata message (first line from sidecar)
         if generic.msg_type == "metadata" {
             let meta: MetadataMsg = serde_json::from_str(&line)?;
+
+            // Validate msg_type field matches expected value
+            if meta.msg_type != "metadata" {
+                return Err(anyhow!(
+                    "metadata message has unexpected type field: '{}' (expected 'metadata')",
+                    meta.msg_type
+                ));
+            }
+
+            eprintln!(
+                "[record_zerodha_wal_l2] received metadata for {} instruments (msg_type={})",
+                meta.instruments.len(),
+                meta.msg_type
+            );
+
             for (symbol, info) in &meta.instruments {
                 lot_sizes.insert(symbol.clone(), info.lot_size);
                 eprintln!(

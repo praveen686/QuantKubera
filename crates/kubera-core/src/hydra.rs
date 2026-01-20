@@ -3103,6 +3103,18 @@ pub struct HydraStrategy {
     default_lot_size: u32,
     /// BINANCE TUNING: Last signal timestamp in milliseconds
     last_signal_ts_ms: i64,
+    /// TUNING: Candidate counter
+    candidate_count: u64,
+    /// TUNING: Rejected candidate counter
+    rejected_count: u64,
+    /// TUNING: Passed candidate counter
+    passed_count: u64,
+    /// TUNING: Max edge observed
+    max_edge_observed: f64,
+    /// TUNING: Edge samples for distribution analysis (VecDeque for O(1) pop_front)
+    edge_samples: VecDeque<f64>,
+    /// TUNING: Max margin (edge - required) observed
+    max_margin_observed: f64,
 }
 
 impl HydraStrategy {
@@ -3158,6 +3170,13 @@ impl HydraStrategy {
             lot_sizes: HashMap::new(),
             default_lot_size: 0, // 0 = no rounding (crypto), set via set_lot_size for NSE
             last_signal_ts_ms: 0, // BINANCE TUNING: Initialize to 0
+            // TUNING: Candidate tracking
+            candidate_count: 0,
+            rejected_count: 0,
+            passed_count: 0,
+            max_edge_observed: 0.0,
+            edge_samples: VecDeque::with_capacity(10000),
+            max_margin_observed: f64::NEG_INFINITY,
         }
     }
 
@@ -3478,12 +3497,58 @@ impl HydraStrategy {
         let hurdle = self.config.edge_hurdle_multiplier;
         let required_edge = self.config.min_edge_bps.max(total_cost * hurdle);
 
+        // ========== CANDIDATE LOGGING (for tuning analysis) ==========
+        self.candidate_count += 1;
+        let margin = weighted_edge - required_edge;
+
+        if weighted_edge > self.max_edge_observed {
+            self.max_edge_observed = weighted_edge;
+        }
+        if margin > self.max_margin_observed {
+            self.max_margin_observed = margin;
+        }
+
+        // Track edge distribution for p95 calculation (VecDeque for O(1) pop_front)
+        self.edge_samples.push_back(weighted_edge);
+        if self.edge_samples.len() > 10000 {
+            self.edge_samples.pop_front();
+        }
+
+        // Log high-edge candidates (rate-limited to every 200 candidates)
+        if weighted_edge > 5.0 && self.candidate_count % 200 == 0 {
+            info!("[HYDRA-CANDIDATE] edge={:.2}bps cost={:.2}bps required={:.2}bps margin={:.2}bps pass={}",
+                  weighted_edge, total_cost, required_edge, margin, weighted_edge >= required_edge);
+        }
+
+        // Periodic stats summary every 5000 candidates
+        if self.candidate_count % 5000 == 0 {
+            let pass_rate = if self.candidate_count > 0 {
+                self.passed_count as f64 / self.candidate_count as f64 * 100.0
+            } else { 0.0 };
+
+            // Compute p95 and p99 from edge samples
+            let (p95, p99) = if !self.edge_samples.is_empty() {
+                let mut sorted: Vec<f64> = self.edge_samples.iter().cloned().collect();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                let p95_idx = ((n as f64 * 0.95) as usize).min(n - 1);
+                let p99_idx = ((n as f64 * 0.99) as usize).min(n - 1);
+                (sorted[p95_idx], sorted[p99_idx])
+            } else { (0.0, 0.0) };
+
+            info!("[HYDRA-STATS] candidates={} passed={} rejected={} pass_rate={:.2}% max_edge={:.2}bps p95_edge={:.2}bps p99_edge={:.2}bps max_margin={:.2}bps",
+                  self.candidate_count, self.passed_count, self.rejected_count, pass_rate,
+                  self.max_edge_observed, p95, p99, self.max_margin_observed);
+        }
+
         if weighted_edge < required_edge {
+            self.rejected_count += 1;
             debug!("[HYDRA] Edge {:.1}bps < required {:.1}bps (cost={:.1}bps, hurdle={:.1}), skipping",
                    weighted_edge, required_edge, total_cost, hurdle);
             self.is_processing = false;
             return;
         }
+        self.passed_count += 1;
 
         // ========== BINANCE TUNING: Time-based cooldown ==========
         let now_ms = chrono::Utc::now().timestamp_millis();
