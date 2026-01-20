@@ -138,6 +138,15 @@ fn get_nse_lot_size(symbol: &str) -> u32 {
     0
 }
 
+/// Heuristic check for NSE/BSE derivative symbols that require lot size rounding.
+fn is_nse_like_symbol(symbol: &str) -> bool {
+    let u = symbol.to_uppercase();
+    // NSE/BSE derivatives naming: FUT/CE/PE suffixes, or index names
+    u.ends_with("FUT") || u.ends_with("CE") || u.ends_with("PE")
+        || u.contains("NIFTY") || u.contains("BANKNIFTY") || u.contains("FINNIFTY")
+        || u.contains("MIDCPNIFTY") || u.contains("SENSEX") || u.contains("BANKEX")
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct StrategyConfig {
     pub hydra: Option<kubera_core::hydra::HydraConfig>,
@@ -171,6 +180,9 @@ struct RiskInfo {
 struct ExecutionInfo {
     slippage_bps: Option<f64>,
     commission_model: Option<String>,
+    /// Per-symbol lot sizes for live/paper trading (NSE F&O).
+    /// For backtests, lot sizes must come from WAL metadata (META:lot_sizes).
+    lot_sizes: Option<std::collections::HashMap<String, u32>>,
 }
 
 use ratatui::{
@@ -512,14 +524,19 @@ async fn async_main() -> anyhow::Result<()> {
                     kubera_core::HydraStrategy::new()
                 };
 
-                // Configure lot sizes: prefer WAL metadata, fallback to hardcoded
+                // STRICT MODE: lot sizes MUST come from WAL metadata (no fallbacks)
+                if backtest_lot_sizes.is_empty() {
+                    error!("[BACKTEST] WAL missing required lot size metadata (META:lot_sizes). Refusing to run with implicit fallbacks.");
+                    error!("[BACKTEST] Re-record the WAL with the updated zerodha_ticker_stream.py to include lot sizes.");
+                    std::process::exit(2);
+                }
                 for symbol in &backtest_symbols {
-                    let lot_size = backtest_lot_sizes
-                        .get(symbol)
-                        .copied()
-                        .unwrap_or_else(|| get_nse_lot_size(symbol));
-                    if lot_size > 0 {
-                        hydra.set_lot_size_for_symbol(symbol, lot_size);
+                    match backtest_lot_sizes.get(symbol).copied() {
+                        Some(lot) if lot > 0 => hydra.set_lot_size_for_symbol(symbol, lot),
+                        _ => {
+                            error!("[BACKTEST] Missing lot size for symbol {} in WAL metadata; refusing to run.", symbol);
+                            std::process::exit(2);
+                        }
                     }
                 }
 
@@ -768,10 +785,25 @@ async fn async_main() -> anyhow::Result<()> {
                         warn!(symbol = %symbol_name, "Could not parse option params - using crude Greeks estimates");
                     }
 
-                    // Configure NSE lot size for proper quantity rounding
-                    let lot_size = get_nse_lot_size(&symbol_name);
-                    if lot_size > 0 {
-                        hydra.set_lot_size_for_symbol(&symbol_name, lot_size);
+                    // Lot-size rounding is mandatory for NSE/BSE derivative-style symbols.
+                    // Must be explicitly configured in [execution.lot_sizes] for live/paper.
+                    if is_nse_like_symbol(&symbol_name) {
+                        let lot = runner_config
+                            .execution
+                            .lot_sizes
+                            .as_ref()
+                            .and_then(|m| m.get(&symbol_name).copied());
+                        match lot {
+                            Some(v) if v > 0 => hydra.set_lot_size_for_symbol(&symbol_name, v),
+                            _ => {
+                                error!(
+                                    symbol = %symbol_name,
+                                    "Missing lot size in config [execution.lot_sizes] for NSE/BSE symbol; refusing to run."
+                                );
+                                error!("Add to config: [execution.lot_sizes]\n{}={}", symbol_name, get_nse_lot_size(&symbol_name));
+                                return;
+                            }
+                        }
                     }
 
                     Box::new(hydra)

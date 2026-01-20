@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use kubera_core::wal::WalWriter;
 use kubera_models::{L2Level, L2Snapshot, MarketEvent, MarketPayload};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -34,7 +34,7 @@ struct DepthMsg {
     sell: Vec<DepthLevelMsg>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct InstrumentInfo {
     token: i64,
     lot_size: u32,
@@ -233,10 +233,9 @@ fn main() -> Result<()> {
             }
             metadata_received = true;
 
-            // Write lot sizes to WAL as a comment/metadata line
-            // Format: #META:lot_sizes:{"SYMBOL":lot_size,...}
-            let lot_sizes_json = serde_json::to_string(&lot_sizes)?;
-            wal.write_metadata(&format!("lot_sizes:{}", lot_sizes_json))?;
+            // Write typed metadata to WAL (lot sizes + instrument info)
+            wal.write_meta("lot_sizes", &lot_sizes)?;
+            wal.write_meta("instrument_info", &meta.instruments)?;
             continue;
         }
 

@@ -289,11 +289,17 @@ pub mod wal {
             Ok(())
         }
 
-        /// Writes metadata to the WAL (e.g., lot_sizes, instrument info).
-        /// Format: META:<key>:<value>
-        pub fn write_metadata(&mut self, data: &str) -> anyhow::Result<()> {
+        /// Writes typed metadata to the WAL as JSON.
+        /// Line format: META:<json(MetaEvent)>
+        /// This is extensible for lot sizes, instrument info, venue configs, etc.
+        pub fn write_meta<V: serde::Serialize>(&mut self, key: &str, value: &V) -> anyhow::Result<()> {
+            let meta = MetaEvent {
+                key: key.to_string(),
+                value: serde_json::to_value(value)?,
+            };
+            let serialized = serde_json::to_vec(&meta)?;
             self.writer.write_all(b"META:")?;
-            self.writer.write_all(data.as_bytes())?;
+            self.writer.write_all(&serialized)?;
             self.writer.write_all(b"\n")?;
             Ok(())
         }
@@ -328,7 +334,7 @@ pub mod wal {
             })
         }
 
-        /// Advances the stream to the next market event, skipping metadata.
+        /// Advances the stream to the next market event, skipping non-market records.
         pub fn next_event(&mut self) -> anyhow::Result<Option<MarketEvent>> {
             use std::io::BufRead;
             let mut line = String::new();
@@ -336,26 +342,28 @@ pub mod wal {
             if bytes_read == 0 {
                 return Ok(None);
             }
-            // Skip ORDER and META lines
-            if line.starts_with("ORDER:") || line.starts_with("META:") {
+            // Skip non-market records
+            if line.starts_with("ORDER:")
+                || line.starts_with("META:")
+                || line.starts_with("RISK:")
+                || line.starts_with("FILL:")
+                || line.starts_with("HEALTH:")
+            {
                 return self.next_event();
             }
             let event: MarketEvent = serde_json::from_str(&line)?;
             Ok(Some(event))
         }
 
-        /// Reads all metadata from the WAL file.
-        /// Returns a HashMap of metadata key -> value.
-        /// Call this at the beginning before reading events.
-        pub fn read_metadata(&mut self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        /// Reads all typed metadata records from the WAL file.
+        /// Returns key -> JSON value map. Call this early (before replay).
+        pub fn read_meta_all(&mut self) -> anyhow::Result<std::collections::HashMap<String, serde_json::Value>> {
             use std::io::{BufRead, Seek, SeekFrom};
 
-            // Save current position
             let pos = self.reader.stream_position()?;
-            // Seek to beginning
             self.reader.seek(SeekFrom::Start(0))?;
 
-            let mut metadata = std::collections::HashMap::new();
+            let mut out = std::collections::HashMap::new();
             let mut line = String::new();
 
             loop {
@@ -365,30 +373,33 @@ pub mod wal {
                     break;
                 }
                 if line.starts_with("META:") {
-                    let content = line[5..].trim();
-                    if let Some(colon_pos) = content.find(':') {
-                        let key = &content[..colon_pos];
-                        let value = &content[colon_pos + 1..];
-                        metadata.insert(key.to_string(), value.to_string());
+                    let json_part = line[5..].trim();
+                    if !json_part.is_empty() {
+                        if let Ok(meta) = serde_json::from_str::<MetaEvent>(json_part) {
+                            out.insert(meta.key, meta.value);
+                        }
                     }
                 }
             }
 
-            // Restore position
             self.reader.seek(SeekFrom::Start(pos))?;
-            Ok(metadata)
+            Ok(out)
         }
 
         /// Reads lot sizes from WAL metadata.
         /// Returns HashMap<Symbol, LotSize>.
         pub fn read_lot_sizes(&mut self) -> anyhow::Result<std::collections::HashMap<String, u32>> {
-            let metadata = self.read_metadata()?;
-            if let Some(lot_sizes_json) = metadata.get("lot_sizes") {
-                let lot_sizes: std::collections::HashMap<String, u32> = serde_json::from_str(lot_sizes_json)?;
-                Ok(lot_sizes)
-            } else {
-                Ok(std::collections::HashMap::new())
+            let meta = self.read_meta_all()?;
+            match meta.get("lot_sizes") {
+                Some(v) => Ok(serde_json::from_value(v.clone())?),
+                None => Ok(std::collections::HashMap::new()),
             }
+        }
+
+        /// Reads instrument info from WAL metadata.
+        pub fn read_instrument_info(&mut self) -> anyhow::Result<Option<serde_json::Value>> {
+            let meta = self.read_meta_all()?;
+            Ok(meta.get("instrument_info").cloned())
         }
 
         /// Retrieves the next command/response record.
@@ -419,6 +430,11 @@ pub mod wal {
                 let json_part = &line[6..];
                 let event: OrderEvent = serde_json::from_str(json_part)?;
                 return Ok(Some(WalEvent::Order(event)));
+            }
+            if line.starts_with("META:") {
+                let json_part = &line[5..];
+                let event: MetaEvent = serde_json::from_str(json_part)?;
+                return Ok(Some(WalEvent::Meta(event)));
             }
             let event: MarketEvent = serde_json::from_str(&line)?;
             Ok(Some(WalEvent::Market(event)))
@@ -461,10 +477,19 @@ pub mod wal {
         }
     }
 
+    /// Typed metadata record (key/value JSON) persisted in WAL.
+    /// Extensible for lot sizes, instrument info, venue configs, etc.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MetaEvent {
+        pub key: String,
+        pub value: serde_json::Value,
+    }
+
     /// Serialization-safe envelope for cross-session data persistence.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum WalEvent {
         Market(MarketEvent),
+        Meta(MetaEvent),
         Order(OrderEvent),
         Risk(RiskEvent),
         Fill(FillEvent),
@@ -652,6 +677,9 @@ impl PersistentEventBus {
                 wal::WalEvent::Market(e) => {
                     self.bus.publish_market(e).await?;
                     market_count += 1;
+                }
+                wal::WalEvent::Meta(_) => {
+                    // Metadata is read separately via read_meta_all(), skip during replay
                 }
                 wal::WalEvent::Order(e) => {
                     self.bus.publish_order(e).await?;

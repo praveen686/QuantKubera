@@ -14,6 +14,12 @@ max_notional_per_symbol_usd = 500000.0
 slippage_bps = 0.2
 commission_model = "Linear"
 
+# Per-symbol lot sizes for live/paper trading (NSE F&O)
+# For backtests, lot sizes must come from WAL metadata
+[execution.lot_sizes]
+NIFTY26JANFUT = 75
+BANKNIFTY26JANFUT = 30
+
 [strategy.aeon]
 # Informational Gating (BIF)
 entropy_word_len = 4
