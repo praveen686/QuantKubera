@@ -1,0 +1,17 @@
+[package]
+name = "kubera-options"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-models = { path = "../kubera-models" }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

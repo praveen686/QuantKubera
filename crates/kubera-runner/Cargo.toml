@@ -1,0 +1,30 @@
+[package]
+name = "kubera-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-core = { path = "../kubera-core" }
+kubera-data = { path = "../kubera-data" }
+kubera-models = { path = "../kubera-models" }
+kubera-executor = { path = "../kubera-executor" }
+kubera-risk = { path = "../kubera-risk" }
+kubera-connectors = { path = "../kubera-connectors" }
+kubera-options = { path = "../kubera-options" }
+tokio = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+metrics = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
+dotenv = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+toml = "0.8"
+axum = { workspace = true, features = ["ws"] }
+tower-http = { workspace = true }
+serde_json = { workspace = true }

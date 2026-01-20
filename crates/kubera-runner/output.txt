@@ -1,0 +1,119 @@
+Script started on 2025-12-18 20:41:19+05:30 [COMMAND="timeout 10s cargo run -p kubera-runner -- --mode paper --symbol BTCUSDT" TERM="xterm-256color" TTY="/dev/pts/10" COLUMNS="70" LINES="10"]
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `filled_quantity`[0m
+[0m  [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-core/src/portfolio.rs:30:47[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m30[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m[1m[38;5;12m...[0m[0mtatus, filled_quantity, avg_price, .. } = &event.payload {[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m           [0m[0m[1m[33m^^^^^^^^^^^^^^^[0m[0m[1m[38;5;12m-[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m           [0m[0m[1m[38;5;12m|[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m           [0m[0m[1m[38;5;12mhelp: try removing the field[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m   [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `#[warn(unused_variables)]` on by default[0m
+
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `avg_price`[0m
+[0m  [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-core/src/portfolio.rs:30:64[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m30[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m[1m[38;5;12m...[0m[0mquantity, avg_price, .. } = &event.payload {[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m              [0m[0m[1m[33m^^^^^^^^^[0m[0m[1m[38;5;12m-[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m              [0m[0m[1m[38;5;12m|[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m              [0m[0m[1m[38;5;12mhelp: try removing the field[0m
+
+[1m[33mwarning[0m[1m:[0m `kubera-core` (lib) generated 2 warnings (run `cargo fix --lib -p kubera-core` to apply 2 suggestions)
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `first_event_processed`[0m
+[0m   [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-connectors/src/lib.rs:368:9[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m368[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m        first_event_processed: bool,[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m         [0m[0m[1m[33m^^^^^^^^^^^^^^^^^^^^^[0m[0m [0m[0m[1m[33mhelp: if this is intentional, prefix it with an underscore: `_first_event_processed`[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m    [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `#[warn(unused_variables)]` on by default[0m
+
+[1m[33mwarning[0m[1m:[0m `kubera-connectors` (lib) generated 1 warning
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `state_market`[0m
+[0m   [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:180:9[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m180[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    let state_market = app_state.clone();[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m         [0m[0m[1m[33m^^^^^^^^^^^^[0m[0m [0m[0m[1m[33mhelp: if this is intentional, prefix it with an underscore: `_state_market`[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m    [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `#[warn(unused_variables)]` on by default[0m
+
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `market_rx`[0m
+[0m   [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:181:13[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m181[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    let mut market_rx = bus_market.subscribe_market();[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m             [0m[0m[1m[33m^^^^^^^^^[0m[0m [0m[0m[1m[33mhelp: if this is intentional, prefix it with an underscore: `_market_rx`[0m
+
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `price`[0m
+[0m   [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:243:51[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m243[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m[1m[38;5;12m...[0m[0m                   MarketPayload::Tick { price, .. } => {[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m                                             [0m[0m[1m[33m^^^^^[0m[0m[1m[38;5;12m-[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m                                             [0m[0m[1m[38;5;12m|[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m                                             [0m[0m[1m[38;5;12mhelp: try removing the field[0m
+
+[0m[1m[33mwarning[0m[0m[1m: unused variable: `close`[0m
+[0m   [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:246:50[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m246[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m[1m[38;5;12m...[0m[0m                   MarketPayload::Bar { close, .. } => {[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m                                            [0m[0m[1m[33m^^^^^[0m[0m[1m[38;5;12m-[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m                                            [0m[0m[1m[38;5;12m|[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m                                            [0m[0m[1m[38;5;12mhelp: try removing the field[0m
+
+[0m[1m[33mwarning[0m[0m[1m: variable does not need to be mutable[0m
+[0m   [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:181:9[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m181[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    let mut market_rx = bus_market.subscribe_market();[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m         [0m[0m[1m[38;5;12m----[0m[0m[1m[33m^^^^^^^^^[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m         [0m[0m[1m[38;5;12m|[0m
+[0m    [0m[0m[1m[38;5;12m|[0m[0m         [0m[0m[1m[38;5;12mhelp: remove this `mut`[0m
+[0m    [0m[0m[1m[38;5;12m|[0m
+[0m    [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `#[warn(unused_mut)]` on by default[0m
+
+[0m[1m[33mwarning[0m[0m[1m: field `execution` is never read[0m
+[0m  [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:25:5[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m24[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0mstruct ModeInfo {[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m        [0m[0m[1m[38;5;12m--------[0m[0m [0m[0m[1m[38;5;12mfield in this struct[0m
+[0m[1m[38;5;12m25[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    execution: String,[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m     [0m[0m[1m[33m^^^^^^^^^[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m   [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `ModeInfo` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis[0m
+[0m   [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `#[warn(dead_code)]` on by default[0m
+
+[0m[1m[33mwarning[0m[0m[1m: fields `simulated` and `api_key_env` are never read[0m
+[0m  [0m[0m[1m[38;5;12m--> [0m[0mcrates/kubera-runner/src/main.rs:37:5[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m[1m[38;5;12m36[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0mstruct ExecutionInfo {[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m        [0m[0m[1m[38;5;12m-------------[0m[0m [0m[0m[1m[38;5;12mfields in this struct[0m
+[0m[1m[38;5;12m37[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    simulated: bool,[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m     [0m[0m[1m[33m^^^^^^^^^[0m
+[0m[1m[38;5;12m38[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    slippage_bps: Option<f64>,[0m
+[0m[1m[38;5;12m39[0m[0m [0m[0m[1m[38;5;12m|[0m[0m [0m[0m    api_key_env: Option<String>,[0m
+[0m   [0m[0m[1m[38;5;12m|[0m[0m     [0m[0m[1m[33m^^^^^^^^^^^[0m
+[0m   [0m[0m[1m[38;5;12m|[0m
+[0m   [0m[0m[1m[38;5;12m= [0m[0m[1mnote[0m[0m: `ExecutionInfo` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis[0m
+
+[1m[33mwarning[0m[1m:[0m `kubera-runner` (bin "kubera-runner") generated 7 warnings (run `cargo fix --bin "kubera-runner"` to apply 3 suggestions)
+[1m[32m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.11s
+[1m[32m     Running[0m `/home/isoula/ QuantKubera/target/debug/kubera-runner --mode paper --symbol BTCUSDT`
+[?1049h[2m2025-12-18T15:11:19.946894Z[0m [32m INFO[0m [2mkubera_core::strategy[0m[2m:[0m [MomentumStrategy] Starting with lookback=5
+[2m2025-12-18T15:11:19.946893Z[0m [32m INFO[0m [2mkubera_core::strategy[0m[2m:[0m [MomentumStrategy] Starting with lookback=5
+[2m2025-12-18T15:11:19.947097Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Connecting to Binance SBE Stream [3msymbol[0m[2m=[0mETHUSDT [3murl[0m[2m=[0mwss://stream-sbe.binance.com:9443/ws/ethusdt@trade
+[2m2025-12-18T15:11:19.947096Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Connecting to Binance SBE Stream [3msymbol[0m[2m=[0mBTCUSDT [3murl[0m[2m=[0mwss://stream-sbe.binance.com:9443/ws/btcusdt@trade
+[2;2H[1m[38;5;2m[49m┌Status────────────────────────────────────────────────────────────┐[3;2H│ QuantKubera PAPER | Status:  [ACTIVE]                            │[4;2H└──────────────────────────────────────────────────────────────────┘[5;2H[22m[39m[49m┌Assets─────────────────────────────────┐┌Portfolio────────────────┐[6;2H│[38;5;3m[49mSymbol    Price      Position  Strategy[39m[49m││[1mMetric       Value       [22m│[7;2H│BTCUSDT[7;13H$0.00[7;24H0.0000[7;34H[38;5;6m[49mON      [39m[49m│└─────────────────────────┘[8;2H│ETHUSDT[8;13H$0.00[8;24H0.0000[8;34H[38;5;6m[49mON      [39m[49m│┌Actions──────────────────┐[9;2H└───────────────────────────────────────┘└─────────────────────────┘[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;14H88242.28[39m[49m[59m[0m[?25l[7;18H4[7;20H81[8;14H2947.69[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;19H77[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[2m2025-12-18T15:11:21.127937Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Fetching snapshot for synchronization [3msymbol[0m[2m=[0mETHUSDT [3mbuffered[0m[2m=[0m10
+[2m2025-12-18T15:11:21.128103Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m[1mfetch_snapshot[0m[2m:[0m [2mkubera_connectors::rest_client[0m[2m:[0m Fetching depth snapshot: https://api.binance.com/api/v3/depth?symbol=ETHUSDT&limit=1000
+[39m[49m[59m[0m[?25l[2m2025-12-18T15:11:21.223114Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Fetching snapshot for synchronization [3msymbol[0m[2m=[0mBTCUSDT [3mbuffered[0m[2m=[0m10
+[2m2025-12-18T15:11:21.223262Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m[1mfetch_snapshot[0m[2m:[0m [2mkubera_connectors::rest_client[0m[2m:[0m Fetching depth snapshot: https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000
+[7;18H6[7;20H4[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[2m2025-12-18T15:11:21.413598Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m[1mfetch_snapshot[0m[2m:[0m [2mkubera_connectors::rest_client[0m[2m:[0m Received depth snapshot: lastUpdateId=67389354352, 1000 bids, 1000 asks
+[2m2025-12-18T15:11:21.414043Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m[1mfetch_snapshot[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Fetched L2 snapshot [3msymbol[0m[2m=[0mETHUSDT [3mupdate_id[0m[2m=[0m67389354352 [3mbids[0m[2m=[0m1000 [3masks[0m[2m=[0m1000
+[2m2025-12-18T15:11:21.427359Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Order book synchronized [3msymbol[0m[2m=[0mETHUSDT [3mlast_applied_u[0m[2m=[0m67389354443
+[2m2025-12-18T15:11:21.441308Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m[1mfetch_snapshot[0m[2m:[0m [2mkubera_connectors::rest_client[0m[2m:[0m Received depth snapshot: lastUpdateId=83485363393, 1000 bids, 1000 asks
+[2m2025-12-18T15:11:21.441651Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m[1mfetch_snapshot[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Fetched L2 snapshot [3msymbol[0m[2m=[0mBTCUSDT [3mupdate_id[0m[2m=[0m83485363393 [3mbids[0m[2m=[0m1000 [3masks[0m[2m=[0m1000
+[2m2025-12-18T15:11:21.442197Z[0m [32m INFO[0m [1mconnect_and_stream[0m[2m:[0m [2mkubera_connectors[0m[2m:[0m Order book synchronized [3msymbol[0m[2m=[0mBTCUSDT [3mlast_applied_u[0m[2m=[0m83485363497
+[7;18H7[7;20H95[8;19H9[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H6[8;17H8[8;19H03[39m[49m[59m[0m[?25l[8;20H4[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H7[39m[49m[59m[0m[?25l[7;17H54[7;20H71[8;19H33[39m[49m[59m[0m[?25l[7;21H4[8;19H54[39m[49m[59m[0m[?25l[7;17H75[7;20H46[8;19H95[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;17H9[8;19H22[39m[49m[59m[0m[?25l[2m2025-12-18T15:11:22.947454Z[0m [32m INFO[0m [2mkubera_risk[0m[2m:[0m Risk Check Passed for order 80e24fa2-f7a9-4e1a-b62c-0446e36ef1bd
+[2m2025-12-18T15:11:22.947553Z[0m [32m INFO[0m [2mkubera_executor[0m[2m:[0m Accepted New Order: BUY BTCUSDT @ None
+[2m2025-12-18T15:11:22.947587Z[0m [32m INFO[0m [2mkubera_risk[0m[2m:[0m Risk Check Passed for order 80e24fa2-f7a9-4e1a-b62c-0446e36ef1bd
+[8;20H4[39m[49m[59m[0m[?25l[2m2025-12-18T15:11:22.990968Z[0m [32m INFO[0m [2mkubera_executor[0m[2m:[0m Simulated Fill: BUY BTCUSDT @ 88279.79186740938
+[2m2025-12-18T15:11:22.991016Z[0m [32m INFO[0m [2mkubera_executor[0m[2m:[0m Position Update: BTCUSDT quantity: 0.05
+[2m2025-12-18T15:11:22.991043Z[0m [32m INFO[0m [2mkubera_risk[0m[2m:[0m Risk Check Passed for order 80e24fa2-f7a9-4e1a-b62c-0446e36ef1bd
+[2m2025-12-18T15:11:22.991099Z[0m [32m INFO[0m [2mkubera_core::portfolio[0m[2m:[0m Fill applied [3msymbol[0m[2m=[0mBTCUSDT [3mside[0m[2m=[0mBuy [3mqty[0m[2m=[0m0.05 [3mprice[0m[2m=[0m88279.79186740938 [3mposition_qty[0m[2m=[0m0.05 [3mtrade_pnl[0m[2m=[0m0
+[7;27H5[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H7[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;20H3[39m[49m[59m[0m[?25l[7;21H6[39m[49m[59m[0m[?25l[8;17H8[8;19H88[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;17H63[7;20H02[8;19H7[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H1[8;20H9[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;17H71[7;20H83[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;19H98[39m[49m[59m[0m[?25l[8;20H9[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;17H63[7;20H02[39m[49m[59m[0m[?25l[8;19H77[39m[49m[59m[0m[?25l[7;17H84[7;20H27[8;17H9[8;19H18[39m[49m[59m[0m[?25l[7;21H8[8;19H24[39m[49m[59m[0m[?25l[7;21H7[8;19H38[39m[49m[59m[0m[?25l[8;19H60[39m[49m[59m[0m[?25l[7;17H93[7;20H15[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H4[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H5[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;20H4[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H4[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;19H59[39m[49m[59m[0m[?25l[7;21H5[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[7;21H4[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[8;19H60[39m[49m[59m[0m[?25l[8;19H3[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l[39m[49m[59m[0m[?25l
+Script done on 2025-12-18 20:41:29+05:30 [COMMAND_EXIT_CODE="124"]

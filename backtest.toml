@@ -1,0 +1,36 @@
+[mode]
+symbols = ["BTCUSDT"]
+
+[risk]
+max_order_value_usd = 100000.0
+max_notional_per_symbol_usd = 500000.0
+
+[execution]
+slippage_bps = 0.2
+commission_model = "Linear"
+
+[strategy.aeon]
+# Informational Gating (BIF)
+entropy_word_len = 4
+mi_word_len = 4
+lookback = 64
+bif_predictability_threshold = 0.38
+
+# Structural Gating (FTI)
+fti_min_period = 5
+fti_max_period = 65
+fti_half_length = 32
+fti_beta = 0.9
+fti_noise_cut = 0.2
+fti_trend_threshold = 3.56
+fti_mean_rev_threshold = 0.80
+
+[strategy.hydra]
+venue = "BinanceFutures"
+learning_rate = 0.033
+zscore_action_threshold = 1.75
+position_hysteresis = 0.2
+lambda_risk = 0.5
+edge_hurdle_multiplier = 0.8
+slippage_bps = 0.2
+commission_bps = 0.8

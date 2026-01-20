@@ -1,0 +1,11 @@
+[mode]
+execution = "live"
+symbol = "BTCUSDT"
+
+[risk]
+max_order_value_usd = 1000.0
+max_notional_per_symbol_usd = 5000.0
+
+[execution]
+simulated = false
+api_key_env = "BINANCE_API_KEY_ED25519"
