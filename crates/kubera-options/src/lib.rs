@@ -28,6 +28,8 @@ pub mod chain;
 pub mod signals;
 pub mod margin;
 pub mod execution;
+pub mod kitesim;
+pub mod replay;
 pub mod backtest;
 pub mod analytics;
 pub mod nse_specs;

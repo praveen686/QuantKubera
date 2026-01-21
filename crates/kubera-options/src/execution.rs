@@ -44,7 +44,7 @@ pub enum LegSide {
 }
 
 /// Constraint on execution price.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LegOrderType {
     /// Immediate fill at current market price.
     Market,
