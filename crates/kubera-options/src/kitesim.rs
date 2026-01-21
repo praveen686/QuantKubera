@@ -4,22 +4,34 @@
 //! *strategy + execution* validation before any live deployment.
 //!
 //! Scope (intentional):
-//! - L1 quote driven (best bid/ask + sizes)
+//! - L1 quote driven (best bid/ask + sizes) - legacy mode
+//! - L2 depth driven (full order book) - Phase-2A mode
 //! - Market + Limit orders
 //! - Configurable latency and partial-fill behavior
 //! - Atomic multi-leg execution coordinator with rollback and optional hedging
 //!
-//! Non-goals (for the skeleton):
-//! - Full order book / L2 depth
-//! - Exchange auction phases / freeze quantities
-//! - Sophisticated adverse selection models
+//! ## Execution Modes
+//! - `L1Quote`: Uses best bid/ask snapshots (backward compatible)
+//! - `L2Book`: Uses full order book depth for realistic multi-level fills
 
 use crate::execution::{LegOrder, LegOrderType, LegSide, LegStatus, MultiLegOrder, MultiLegResult, LegExecutionResult};
-use crate::replay::{QuoteEvent, ReplayEvent};
+use crate::replay::{QuoteEvent, ReplayEvent, DepthEvent};
 use crate::specs::SpecStore;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Execution mode for the simulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimExecutionMode {
+    /// L1 quote-driven execution (best bid/ask only).
+    /// This is the legacy mode for backward compatibility.
+    #[default]
+    L1Quote,
+    /// L2 depth-driven execution (full order book).
+    /// Uses multi-level fill simulation for realistic slippage.
+    L2Book,
+}
 
 /// Configuration for the simulator.
 #[derive(Debug, Clone)]
@@ -36,6 +48,8 @@ pub struct KiteSimConfig {
     pub adverse_selection_max_bps: f64,
     /// Reject order if no quote received within this duration (Patch 2 hook).
     pub reject_if_no_quote_after: Duration,
+    /// Execution mode: L1Quote (legacy) or L2Book (depth-based).
+    pub execution_mode: SimExecutionMode,
 }
 
 impl Default for KiteSimConfig {
@@ -46,6 +60,7 @@ impl Default for KiteSimConfig {
             taker_slippage_bps: 0.0,
             adverse_selection_max_bps: 0.0,
             reject_if_no_quote_after: Duration::seconds(10),
+            execution_mode: SimExecutionMode::L1Quote,
         }
     }
 }
@@ -100,11 +115,155 @@ impl SimOrder {
     }
 }
 
+/// L2 order book wrapper for KiteSim.
+/// Stores the order book along with its exponents for price/qty conversion.
+#[derive(Debug, Clone)]
+pub struct SimOrderBook {
+    /// Price mantissa → quantity mantissa
+    bids: std::collections::BTreeMap<i64, i64>,
+    /// Price mantissa → quantity mantissa
+    asks: std::collections::BTreeMap<i64, i64>,
+    /// Price exponent: actual_price = mantissa * 10^price_exponent
+    price_exponent: i8,
+    /// Quantity exponent: actual_qty = mantissa * 10^qty_exponent
+    qty_exponent: i8,
+    /// Last processed update ID for gap detection.
+    last_update_id: u64,
+}
+
+impl SimOrderBook {
+    fn new(price_exponent: i8, qty_exponent: i8) -> Self {
+        Self {
+            bids: std::collections::BTreeMap::new(),
+            asks: std::collections::BTreeMap::new(),
+            price_exponent,
+            qty_exponent,
+            last_update_id: 0,
+        }
+    }
+
+    fn price_to_f64(&self, mantissa: i64) -> f64 {
+        mantissa as f64 * 10f64.powi(self.price_exponent as i32)
+    }
+
+    fn qty_to_f64(&self, mantissa: i64) -> f64 {
+        mantissa as f64 * 10f64.powi(self.qty_exponent as i32)
+    }
+
+    fn best_bid(&self) -> Option<(f64, f64)> {
+        self.bids.iter().next_back().map(|(&p, &q)| (self.price_to_f64(p), self.qty_to_f64(q)))
+    }
+
+    fn best_ask(&self) -> Option<(f64, f64)> {
+        self.asks.iter().next().map(|(&p, &q)| (self.price_to_f64(p), self.qty_to_f64(q)))
+    }
+
+    fn mid(&self) -> Option<f64> {
+        match (self.best_bid(), self.best_ask()) {
+            (Some((bid, _)), Some((ask, _))) => Some((bid + ask) / 2.0),
+            _ => None,
+        }
+    }
+
+    /// Simulates a market buy, walking through ask levels.
+    /// Returns (avg_price, filled_qty) or None if no liquidity.
+    fn simulate_market_buy(&self, qty: f64) -> Option<(f64, f64)> {
+        let qty_mantissa = (qty / 10f64.powi(self.qty_exponent as i32)).round() as i64;
+        let mut remaining = qty_mantissa;
+        let mut total_cost = 0i128;
+        let mut total_filled = 0i64;
+
+        for (&price, &level_qty) in self.asks.iter() {
+            if remaining <= 0 {
+                break;
+            }
+            let fill = remaining.min(level_qty);
+            total_cost += (price as i128) * (fill as i128);
+            total_filled += fill;
+            remaining -= fill;
+        }
+
+        if total_filled == 0 {
+            return None;
+        }
+
+        let cost_f64 = (total_cost as f64) * 10f64.powi((self.price_exponent + self.qty_exponent) as i32);
+        let filled_f64 = self.qty_to_f64(total_filled);
+        let avg_price = cost_f64 / filled_f64;
+
+        Some((avg_price, filled_f64))
+    }
+
+    /// Simulates a market sell, walking through bid levels.
+    /// Returns (avg_price, filled_qty) or None if no liquidity.
+    fn simulate_market_sell(&self, qty: f64) -> Option<(f64, f64)> {
+        let qty_mantissa = (qty / 10f64.powi(self.qty_exponent as i32)).round() as i64;
+        let mut remaining = qty_mantissa;
+        let mut total_proceeds = 0i128;
+        let mut total_filled = 0i64;
+
+        for (&price, &level_qty) in self.bids.iter().rev() {
+            if remaining <= 0 {
+                break;
+            }
+            let fill = remaining.min(level_qty);
+            total_proceeds += (price as i128) * (fill as i128);
+            total_filled += fill;
+            remaining -= fill;
+        }
+
+        if total_filled == 0 {
+            return None;
+        }
+
+        let proceeds_f64 = (total_proceeds as f64) * 10f64.powi((self.price_exponent + self.qty_exponent) as i32);
+        let filled_f64 = self.qty_to_f64(total_filled);
+        let avg_price = proceeds_f64 / filled_f64;
+
+        Some((avg_price, filled_f64))
+    }
+
+    /// Apply a depth event to the order book.
+    fn apply_depth(&mut self, event: &DepthEvent) -> Result<(), String> {
+        // Gap detection
+        if self.last_update_id > 0 && event.first_update_id != self.last_update_id + 1 {
+            return Err(format!(
+                "Sequence gap: expected {}, got {}",
+                self.last_update_id + 1,
+                event.first_update_id
+            ));
+        }
+
+        // Apply bid updates
+        for level in &event.bids {
+            if level.qty == 0 {
+                self.bids.remove(&level.price);
+            } else {
+                self.bids.insert(level.price, level.qty);
+            }
+        }
+
+        // Apply ask updates
+        for level in &event.asks {
+            if level.qty == 0 {
+                self.asks.remove(&level.price);
+            } else {
+                self.asks.insert(level.price, level.qty);
+            }
+        }
+
+        self.last_update_id = event.last_update_id;
+        Ok(())
+    }
+}
+
 /// Primary simulator: accepts quote events and matches eligible orders.
 pub struct KiteSim {
     cfg: KiteSimConfig,
     specs: Option<SpecStore>,
     last_quotes: HashMap<String, Quote>,
+    /// L2 order books per symbol (only used in L2Book mode).
+    order_books: HashMap<String, SimOrderBook>,
     orders: HashMap<String, SimOrder>,
     stats: KiteSimRunStats,
     next_id: AtomicU64,
@@ -118,6 +277,7 @@ impl KiteSim {
             cfg,
             specs: None,
             last_quotes: HashMap::new(),
+            order_books: HashMap::new(),
             orders: HashMap::new(),
             stats: KiteSimRunStats::default(),
             next_id: AtomicU64::new(1),
@@ -144,6 +304,7 @@ impl KiteSim {
     pub fn ingest_event(&mut self, event: &ReplayEvent) {
         match event {
             ReplayEvent::Quote(q) => self.on_quote(q.clone()),
+            ReplayEvent::Depth(d) => self.on_depth(d.clone()),
         }
     }
 
@@ -212,7 +373,33 @@ impl KiteSim {
         self.now = event.ts();
         match event {
             ReplayEvent::Quote(q) => self.on_quote(q),
+            ReplayEvent::Depth(d) => self.on_depth(d),
         }
+    }
+
+    /// Process an L2 depth event.
+    /// In L2Book mode: updates the order book and triggers matching.
+    /// In L1Quote mode: ignored (use on_quote for L1).
+    pub fn on_depth(&mut self, d: DepthEvent) {
+        if self.cfg.execution_mode != SimExecutionMode::L2Book {
+            return; // Ignore depth events in L1 mode
+        }
+
+        let symbol = d.tradingsymbol.clone();
+
+        // Get or create the order book for this symbol
+        let book = self.order_books.entry(symbol.clone()).or_insert_with(|| {
+            SimOrderBook::new(d.price_exponent, d.qty_exponent)
+        });
+
+        // Apply the depth update
+        if let Err(e) = book.apply_depth(&d) {
+            tracing::warn!("Depth update error for {}: {}", symbol, e);
+            return;
+        }
+
+        // Trigger order matching against the updated book
+        self.match_eligible_orders_for_l2(&symbol);
     }
 
     pub fn on_quote(&mut self, q: QuoteEvent) {
@@ -302,6 +489,117 @@ impl KiteSim {
                 continue;
             }
             self.try_fill_order(&id, q);
+        }
+    }
+
+    /// L2 order matching using the full order book.
+    fn match_eligible_orders_for_l2(&mut self, tradingsymbol: &str) {
+        let Some(book) = self.order_books.get(tradingsymbol) else { return; };
+
+        // Extract book data to avoid borrow conflicts
+        let mid = book.mid();
+
+        // Collect order ids to process
+        let ids: Vec<String> = self
+            .orders
+            .iter()
+            .filter_map(|(id, o)| {
+                if o.tradingsymbol == tradingsymbol {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for id in ids {
+            let eligible;
+            let (rem, side, order_type, limit_price, mid_at_place, filled_qty, avg_price);
+            {
+                let Some(o) = self.orders.get(&id) else { continue; };
+                eligible = self.now >= o.eligible_ts
+                    && matches!(o.status, LegStatus::Placed | LegStatus::PartiallyFilled);
+                rem = o.remaining();
+                side = o.side;
+                order_type = o.order_type;
+                limit_price = o.limit_price;
+                mid_at_place = o.mid_at_place;
+                filled_qty = o.filled_qty;
+                avg_price = o.avg_price;
+            }
+
+            if !eligible || rem == 0 {
+                continue;
+            }
+
+            // Get book reference again for simulation
+            let Some(book) = self.order_books.get(tradingsymbol) else { continue; };
+
+            // Simulate the fill using the full order book
+            let sim_result = match side {
+                LegSide::Buy => book.simulate_market_buy(rem as f64),
+                LegSide::Sell => book.simulate_market_sell(rem as f64),
+            };
+
+            let Some((sim_avg_price, sim_filled_qty)) = sim_result else {
+                continue; // No liquidity
+            };
+
+            // For limit orders, check if we can fill at or better than limit
+            if order_type == LegOrderType::Limit {
+                if let Some(lim) = limit_price {
+                    match side {
+                        LegSide::Buy if sim_avg_price > lim => continue,
+                        LegSide::Sell if sim_avg_price < lim => continue,
+                        _ => {}
+                    }
+                } else {
+                    // Malformed limit order
+                    if let Some(o) = self.orders.get_mut(&id) {
+                        o.status = LegStatus::Rejected;
+                    }
+                    continue;
+                }
+            }
+
+            // Apply slippage adjustment
+            let slip = sim_avg_price * (self.cfg.taker_slippage_bps / 10_000.0);
+            let base_px = match side {
+                LegSide::Buy => sim_avg_price + slip,
+                LegSide::Sell => sim_avg_price - slip,
+            };
+
+            // Apply adverse selection if enabled
+            let current_mid = mid.unwrap_or(0.0);
+            let fill_px = self.adverse_adjust(base_px, side, mid_at_place, current_mid);
+
+            // Calculate fill quantity (may be partial based on book depth)
+            let fill_qty = (sim_filled_qty as u32).min(rem);
+            if fill_qty == 0 {
+                continue;
+            }
+
+            // Update order state
+            if let Some(o) = self.orders.get_mut(&id) {
+                let total_qty = filled_qty + fill_qty;
+                let new_avg = if let Some(old_avg) = avg_price {
+                    let old_val = old_avg * (filled_qty as f64);
+                    let new_val = fill_px * (fill_qty as f64);
+                    (old_val + new_val) / (total_qty as f64)
+                } else {
+                    fill_px
+                };
+                o.filled_qty = total_qty;
+                o.avg_price = Some(new_avg);
+                o.status = if o.remaining() == 0 {
+                    LegStatus::Filled
+                } else {
+                    LegStatus::PartiallyFilled
+                };
+
+                // Record slippage
+                self.record_slip(side, fill_px, current_mid);
+            }
         }
     }
 
@@ -603,6 +901,7 @@ mod tests {
             taker_slippage_bps: 0.0,
             adverse_selection_max_bps: 0.0,
             reject_if_no_quote_after: Duration::seconds(10),
+            execution_mode: SimExecutionMode::L1Quote,
         };
         let mut sim = KiteSim::new(cfg);
 

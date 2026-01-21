@@ -4022,6 +4022,7 @@ mod tests {
     fn test_hydra_strategy_initialization() {
         let strategy = HydraStrategy::new();
         assert_eq!(strategy.name(), "HYDRA");
-        assert_eq!(strategy.experts.len(), 5);
+        // 6 experts: Trend, MeanRev, Volatility, Microstructure, RelativeValue, RankSpaceMeanRev
+        assert_eq!(strategy.experts.len(), 6);
     }
 }

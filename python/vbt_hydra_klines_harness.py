@@ -254,7 +254,7 @@ def _pf_stats(pf: "vbt.Portfolio") -> dict:
 
 
 # ----------------------------
-# HYDRA-lite expert ensemble
+# HYDRA expert ensemble (6 experts)
 # ----------------------------
 
 def rolling_percentile_rank(x: pd.Series, window: int) -> pd.Series:
@@ -269,7 +269,8 @@ def rolling_percentile_rank(x: pd.Series, window: int) -> pd.Series:
 
 def hydra_experts(ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute HYDRA-lite expert signals as continuous scores in [-1, +1].
+    Compute HYDRA expert signals as continuous scores in [-1, +1].
+    6 experts: Trend, MeanRev, Volatility, Microstructure, RelativeValue, RankSpaceMeanRev.
     These are intentionally simple and fast for klines-based screening.
     """
     close = ohlcv["close"]
@@ -433,7 +434,7 @@ def run_hydra_quicktest(
     venue_exchange: str,
 ) -> None:
     """
-    HYDRA-lite quick test:
+    HYDRA quick test:
     - compute experts + ensemble score
     - run long-only VBT portfolio using score thresholding
     - emit artifacts and (optionally) one orders.json for KiteSim smoke validation
@@ -460,7 +461,7 @@ def run_hydra_quicktest(
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "engine": "vectorbtpro",
-        "mode": "hydra_lite",
+        "mode": "hydra",
         "fees_bps": fees_bps,
         "slippage_bps": slippage_bps,
         "threshold": threshold,
@@ -493,7 +494,7 @@ def run_hydra_quicktest(
 
         emit_orders_json(
             out_path=orders_out,
-            strategy_name=summary.get("mode", "HYDRA_LITE").upper(),
+            strategy_name=summary.get("mode", "HYDRA").upper(),
             symbol=str(ohlcv.attrs.get("symbol", "BTCUSDT")),
             exchange=venue_exchange,
             side=side,
@@ -574,7 +575,7 @@ def run_hydra_quicktest_with_intents(
     venue_exchange: str,
 ) -> None:
     """
-    HYDRA-lite quick test with scheduled intents output.
+    HYDRA quick test with scheduled intents output.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -598,7 +599,7 @@ def run_hydra_quicktest_with_intents(
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "engine": "vectorbtpro",
-        "mode": "hydra_lite",
+        "mode": "hydra",
         "fees_bps": fees_bps,
         "slippage_bps": slippage_bps,
         "threshold": threshold,
@@ -627,7 +628,7 @@ def run_hydra_quicktest_with_intents(
 
         emit_intents_json(
             out_path=intents_out,
-            strategy_name=summary.get("mode", "HYDRA_LITE").upper(),
+            strategy_name=summary.get("mode", "HYDRA").upper(),
             symbol=str(ohlcv.attrs.get("symbol", "BTCUSDT")),
             exchange=venue_exchange,
             entries=entries,
@@ -647,7 +648,7 @@ def main() -> int:
     ap.add_argument("--fees-bps", type=float, default=1.0, help="Fees in bps (rough)")
     ap.add_argument("--slippage-bps", type=float, default=0.5, help="Slippage in bps (rough)")
     ap.add_argument("--force-fetch", action="store_true", help="Ignore cache and refetch")
-    ap.add_argument("--mode", default="hydra", choices=["hydra", "baselines"], help="Run HYDRA-lite or baseline strategies")
+    ap.add_argument("--mode", default="hydra", choices=["hydra", "baselines"], help="Run HYDRA or baseline strategies")
     ap.add_argument("--threshold", type=float, default=0.15, help="HYDRA score threshold for long entry")
     ap.add_argument("--emit-orders", action="store_true", help="Emit orders.json compatible with backtest-kitesim (single-leg intent)")
     ap.add_argument("--emit-intents", action="store_true", help="Emit intents.json with timestamped entry/exit orders for scheduled execution")

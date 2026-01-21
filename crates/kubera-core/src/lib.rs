@@ -51,6 +51,7 @@ pub mod rmt;
 pub mod metrics;
 pub mod aeon;
 pub mod parquet_export;
+pub mod lob;
 
 pub use strategy::{Strategy, StrategyRunner, MomentumStrategy};
 pub use oras::OrasStrategy;
@@ -60,6 +61,7 @@ pub use aeon::AeonStrategy;
 pub use mode::{ExecutionMode, ModeConfig};
 pub use portfolio::Portfolio;
 pub use metrics::{TradingMetrics, MetricsConfig, MetricsSnapshot, TradeRecord};
+pub use lob::{OrderBook, LevelDelta, LobError};
 
 /// Unified event container for the QuantKubera ecosystem.
 ///

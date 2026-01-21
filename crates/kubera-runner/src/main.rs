@@ -31,6 +31,7 @@ mod circuit_breakers;
 mod kitesim_backtest;
 mod order_io;
 mod binance_capture;
+mod binance_depth_capture;
 mod binance_exchange_info;
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
@@ -219,6 +220,29 @@ enum Commands {
         duration_secs: u64,
     },
 
+    /// Capture Binance Spot depth stream into DepthEvent JSONL (L2 replay).
+    CaptureDepth {
+        /// Symbol, e.g. BTCUSDT
+        #[arg(long)]
+        symbol: String,
+
+        /// Output path, e.g. data/replay/binance/BTCUSDT_depth.jsonl
+        #[arg(long)]
+        out: String,
+
+        /// Capture duration in seconds
+        #[arg(long, default_value_t = 300)]
+        duration_secs: u64,
+
+        /// Price exponent for scaled integers (e.g., -2 for 2 decimal places)
+        #[arg(long, default_value_t = -2)]
+        price_exponent: i8,
+
+        /// Quantity exponent for scaled integers (e.g., -8 for 8 decimal places)
+        #[arg(long, default_value_t = -8)]
+        qty_exponent: i8,
+    },
+
     /// Offline KiteSim backtest runner (Mode B/C).
     BacktestKitesim {
         /// Venue selector: auto, binance, zerodha
@@ -244,6 +268,10 @@ enum Commands {
         /// Path to intents JSON (OrderIntentFile with scheduled timestamps). Overrides bulk orders mode.
         #[arg(long)]
         intents: Option<String>,
+
+        /// Path to depth replay file (DepthEvent JSONL). If set, uses L2Book mode.
+        #[arg(long)]
+        depth: Option<String>,
 
         /// Output directory for report.json
         #[arg(long, default_value = "artifacts/kitesim")]
@@ -383,6 +411,23 @@ async fn async_main() -> anyhow::Result<()> {
                 println!("Capture complete: {}", out);
                 return Ok(());
             }
+            Commands::CaptureDepth { symbol, out, duration_secs, price_exponent, qty_exponent } => {
+                let out_path = std::path::Path::new(&out);
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                println!("Capturing Binance {} depth stream for {} seconds (price_exp={}, qty_exp={})...",
+                    symbol, duration_secs, price_exponent, qty_exponent);
+                let count = binance_depth_capture::capture_depth_jsonl(
+                    &symbol,
+                    out_path,
+                    duration_secs,
+                    price_exponent,
+                    qty_exponent,
+                ).await?;
+                println!("Capture complete: {} ({} events)", out, count);
+                return Ok(());
+            }
             Commands::BacktestKitesim {
                 venue,
                 qty_scale,
@@ -390,6 +435,7 @@ async fn async_main() -> anyhow::Result<()> {
                 replay,
                 orders,
                 intents,
+                depth,
                 out,
                 timeout_ms,
                 latency_ms,
@@ -406,6 +452,7 @@ async fn async_main() -> anyhow::Result<()> {
                         replay_path: replay,
                         orders_path: orders,
                         intents_path: intents,
+                        depth_path: depth,
                         out_dir: out,
                         timeout_ms,
                         latency_ms,

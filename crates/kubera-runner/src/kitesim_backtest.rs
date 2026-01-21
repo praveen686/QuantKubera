@@ -13,8 +13,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use kubera_options::execution::{LegSide, LegStatus, MultiLegOrder};
-use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLegCoordinator};
-use kubera_options::replay::{QuoteEvent, ReplayEvent, ReplayFeed};
+use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLegCoordinator, SimExecutionMode};
+use kubera_options::replay::{QuoteEvent, DepthEvent, ReplayEvent, ReplayFeed};
 use kubera_options::report::{BacktestReport, FillMetrics};
 use kubera_options::specs::SpecStore;
 
@@ -43,6 +43,8 @@ pub struct KiteSimCliConfig {
     pub replay_path: String,
     pub orders_path: String,
     pub intents_path: Option<String>,
+    /// Path to depth replay file (DepthEvent JSONL). If set, uses L2Book mode.
+    pub depth_path: Option<String>,
     pub out_dir: String,
     pub timeout_ms: i64,
     pub latency_ms: i64,
@@ -71,6 +73,21 @@ pub fn load_quotes_jsonl(path: &Path) -> Result<Vec<ReplayEvent>> {
     Ok(out)
 }
 
+/// Load JSONL depth events. Each line must be a DepthEvent JSON object.
+pub fn load_depth_jsonl(path: &Path) -> Result<Vec<ReplayEvent>> {
+    let f = File::open(path).with_context(|| format!("open depth file: {:?}", path))?;
+    let br = BufReader::new(f);
+    let mut out = Vec::new();
+    for (i, line) in br.lines().enumerate() {
+        let line = line.with_context(|| format!("read line {}", i + 1))?;
+        if line.trim().is_empty() { continue; }
+        let d: DepthEvent = serde_json::from_str(&line)
+            .with_context(|| format!("parse DepthEvent JSON on line {}", i + 1))?;
+        out.push(ReplayEvent::Depth(d));
+    }
+    Ok(out)
+}
+
 pub fn load_orders_json(path: &Path) -> Result<OrderFile> {
     let s = std::fs::read_to_string(path).with_context(|| format!("read orders file: {:?}", path))?;
     let of: OrderFile = serde_json::from_str(&s).with_context(|| "parse OrderFile JSON")?;
@@ -88,7 +105,22 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
     let orders_path = Path::new(&cfg.orders_path);
     let out_dir = Path::new(&cfg.out_dir);
 
-    let replay_events = load_quotes_jsonl(replay_path)?;
+    // Determine execution mode based on depth_path
+    let use_l2_mode = cfg.depth_path.is_some();
+    let execution_mode = if use_l2_mode {
+        SimExecutionMode::L2Book
+    } else {
+        SimExecutionMode::L1Quote
+    };
+
+    // Load events: quote events (always), depth events (if L2 mode)
+    let mut replay_events = load_quotes_jsonl(replay_path)?;
+
+    if let Some(ref depth_path) = cfg.depth_path {
+        let depth_events = load_depth_jsonl(Path::new(depth_path))?;
+        println!("Loaded {} depth events for L2Book mode", depth_events.len());
+        replay_events.extend(depth_events);
+    }
 
     // Determine if using intents or bulk orders
     let use_intents = cfg.intents_path.is_some();
@@ -116,6 +148,7 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
         taker_slippage_bps: cfg.slippage_bps,
         adverse_selection_max_bps: cfg.adverse_bps,
         reject_if_no_quote_after: Duration::milliseconds(cfg.stale_quote_ms),
+        execution_mode,
     });
 
     // Build SpecStore with venue-specific specs
