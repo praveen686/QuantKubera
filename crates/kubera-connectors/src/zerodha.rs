@@ -36,7 +36,7 @@ use std::time::Duration;
 use tracing::{info, warn, error, debug, instrument};
 use std::process::Command;
 use serde::{Deserialize, Serialize};
-use chrono::Utc;
+use chrono::{Utc, NaiveDate, Datelike, Weekday, Timelike};
 use tokio::time::{sleep, Instant};
 
 /// Base URL for Kite Connect REST API.
@@ -953,7 +953,7 @@ impl ZerodhaExecutionClient {
     #[instrument(skip(self))]
     pub async fn get_positions(&self) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/portfolio/positions", KITE_API_URL);
-        
+
         let response = self.client.get(&url)
             .header("X-Kite-Version", "3")
             .header("Authorization", format!("token {}:{}", self.api_key, self.access_token))
@@ -962,5 +962,340 @@ impl ZerodhaExecutionClient {
 
         let positions = response.json::<serde_json::Value>().await?;
         Ok(positions)
+    }
+}
+
+// =============================================================================
+// AUTO-DISCOVERY MODULE
+// Automatically discovers ATM NIFTY/BANKNIFTY options for the nearest expiry
+// =============================================================================
+
+/// Represents an NFO instrument from Zerodha's instruments master
+#[derive(Debug, Clone)]
+pub struct NfoInstrument {
+    pub instrument_token: u32,
+    pub tradingsymbol: String,
+    pub name: String,  // NIFTY, BANKNIFTY, etc.
+    pub expiry: NaiveDate,
+    pub strike: f64,
+    pub instrument_type: String, // CE or PE
+    pub lot_size: u32,
+}
+
+/// Configuration for auto-discovery
+#[derive(Debug, Clone)]
+pub struct AutoDiscoveryConfig {
+    /// Underlying to discover (NIFTY, BANKNIFTY, FINNIFTY)
+    pub underlying: String,
+    /// Number of strikes around ATM to include (e.g., 2 = ATM ± 2 strikes)
+    pub strikes_around_atm: u32,
+    /// Strike interval (50 for NIFTY, 100 for BANKNIFTY)
+    pub strike_interval: f64,
+    /// Include only weekly expiry (next Thursday)
+    pub weekly_only: bool,
+}
+
+impl Default for AutoDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            underlying: "NIFTY".to_string(),
+            strikes_around_atm: 1,  // ATM and 1 strike each side
+            strike_interval: 50.0,
+            weekly_only: true,
+        }
+    }
+}
+
+impl AutoDiscoveryConfig {
+    pub fn nifty_atm() -> Self {
+        Self::default()
+    }
+
+    pub fn banknifty_atm() -> Self {
+        Self {
+            underlying: "BANKNIFTY".to_string(),
+            strikes_around_atm: 1,
+            strike_interval: 100.0,
+            weekly_only: true,
+        }
+    }
+}
+
+/// Auto-discovery client for Zerodha NFO instruments
+pub struct ZerodhaAutoDiscovery {
+    api_key: String,
+    access_token: String,
+    client: reqwest::Client,
+}
+
+impl ZerodhaAutoDiscovery {
+    pub fn new(api_key: String, access_token: String) -> Self {
+        Self {
+            api_key,
+            access_token,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Create from sidecar authentication
+    pub fn from_sidecar() -> anyhow::Result<Self> {
+        let output = Command::new("python3")
+            .arg("crates/kubera-connectors/scripts/zerodha_auth.py")
+            .output()?;
+
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Zerodha auth failed: {}", err));
+        }
+
+        let auth: AuthOutput = serde_json::from_slice(&output.stdout)?;
+        Ok(Self::new(auth.api_key, auth.access_token))
+    }
+
+    /// Get current spot price for an underlying (NIFTY, BANKNIFTY, etc.)
+    pub async fn get_spot_price(&self, underlying: &str) -> anyhow::Result<f64> {
+        let symbol = match underlying.to_uppercase().as_str() {
+            "NIFTY" => "NSE:NIFTY 50",
+            "BANKNIFTY" => "NSE:NIFTY BANK",
+            "FINNIFTY" => "NSE:NIFTY FIN SERVICE",
+            _ => return Err(anyhow::anyhow!("Unknown underlying: {}", underlying)),
+        };
+
+        let url = format!("{}/quote", KITE_API_URL);
+        let response = self.client.get(&url)
+            .query(&[("i", symbol)])
+            .header("X-Kite-Version", "3")
+            .header("Authorization", format!("token {}:{}", self.api_key, self.access_token))
+            .send()
+            .await?;
+
+        let quote_resp: KiteQuoteResponse = response.json().await?;
+
+        if quote_resp.status != "success" {
+            return Err(anyhow::anyhow!("Failed to fetch spot price for {}", underlying));
+        }
+
+        for (_, quote) in quote_resp.data {
+            return Ok(quote.last_price);
+        }
+
+        Err(anyhow::anyhow!("No quote data for {}", underlying))
+    }
+
+    /// Fetch all NFO instruments from Zerodha master
+    pub async fn fetch_nfo_instruments(&self) -> anyhow::Result<Vec<NfoInstrument>> {
+        let url = format!("{}/instruments/NFO", KITE_API_URL);
+
+        info!("[AUTO-DISCOVERY] Fetching NFO instruments master...");
+
+        let response = self.client.get(&url)
+            .header("X-Kite-Version", "3")
+            .header("Authorization", format!("token {}:{}", self.api_key, self.access_token))
+            .send()
+            .await?
+            .text()
+            .await?;
+
+        let mut instruments = Vec::new();
+
+        // CSV format: instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange
+        for line in response.lines().skip(1) {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() < 10 {
+                continue;
+            }
+
+            let instrument_type = parts[9].trim_matches('"');
+
+            // Only keep options (CE/PE)
+            if instrument_type != "CE" && instrument_type != "PE" {
+                continue;
+            }
+
+            let instrument_token: u32 = parts[0].parse().unwrap_or(0);
+            let tradingsymbol = parts[2].trim_matches('"').to_string();
+            let name = parts[3].trim_matches('"').to_string();
+            let expiry_str = parts[5].trim_matches('"');
+            let strike: f64 = parts[6].parse().unwrap_or(0.0);
+            let lot_size: u32 = parts[8].parse().unwrap_or(1);
+
+            // Parse expiry date (format: YYYY-MM-DD)
+            let expiry = match NaiveDate::parse_from_str(expiry_str, "%Y-%m-%d") {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            instruments.push(NfoInstrument {
+                instrument_token,
+                tradingsymbol,
+                name,
+                expiry,
+                strike,
+                instrument_type: instrument_type.to_string(),
+                lot_size,
+            });
+        }
+
+        info!("[AUTO-DISCOVERY] Loaded {} NFO option instruments", instruments.len());
+        Ok(instruments)
+    }
+
+    /// Find the next weekly expiry (Thursday) from today
+    pub fn next_weekly_expiry() -> NaiveDate {
+        let today = Utc::now().date_naive();
+        let days_until_thursday = (Weekday::Thu.num_days_from_monday() as i64
+            - today.weekday().num_days_from_monday() as i64 + 7) % 7;
+
+        if days_until_thursday == 0 {
+            // If today is Thursday, use today if before market close, otherwise next week
+            let now = Utc::now();
+            if now.hour() < 15 || (now.hour() == 15 && now.minute() < 30) {
+                today
+            } else {
+                today + chrono::Duration::days(7)
+            }
+        } else {
+            today + chrono::Duration::days(days_until_thursday)
+        }
+    }
+
+    /// Calculate ATM strike from spot price
+    pub fn atm_strike(spot: f64, strike_interval: f64) -> f64 {
+        (spot / strike_interval).round() * strike_interval
+    }
+
+    /// Auto-discover ATM options based on configuration
+    /// Returns a list of (tradingsymbol, instrument_token) pairs
+    pub async fn discover_symbols(&self, config: &AutoDiscoveryConfig) -> anyhow::Result<Vec<(String, u32)>> {
+        // 1. Get current spot price
+        let spot = self.get_spot_price(&config.underlying).await?;
+        info!("[AUTO-DISCOVERY] {} spot price: {:.2}", config.underlying, spot);
+
+        // 2. Calculate ATM strike
+        let atm = Self::atm_strike(spot, config.strike_interval);
+        info!("[AUTO-DISCOVERY] ATM strike: {:.0}", atm);
+
+        // 3. Determine target expiry
+        let target_expiry = Self::next_weekly_expiry();
+        info!("[AUTO-DISCOVERY] Target expiry: {}", target_expiry);
+
+        // 4. Fetch all NFO instruments
+        let instruments = self.fetch_nfo_instruments().await?;
+
+        // 5. Filter to matching underlying and expiry
+        let matching: Vec<_> = instruments.iter()
+            .filter(|i| i.name == config.underlying)
+            .filter(|i| i.expiry == target_expiry)
+            .collect();
+
+        if matching.is_empty() {
+            // Try finding next available expiry if exact match not found
+            let available_expiries: Vec<_> = instruments.iter()
+                .filter(|i| i.name == config.underlying)
+                .filter(|i| i.expiry >= Utc::now().date_naive())
+                .map(|i| i.expiry)
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            if let Some(nearest) = available_expiries.into_iter().min() {
+                info!("[AUTO-DISCOVERY] Exact expiry {} not found, using nearest: {}", target_expiry, nearest);
+                return self.discover_symbols_for_expiry(config, spot, atm, nearest, &instruments).await;
+            }
+
+            return Err(anyhow::anyhow!("No options found for {} expiry {}", config.underlying, target_expiry));
+        }
+
+        self.discover_symbols_for_expiry(config, spot, atm, target_expiry, &instruments).await
+    }
+
+    async fn discover_symbols_for_expiry(
+        &self,
+        config: &AutoDiscoveryConfig,
+        spot: f64,
+        atm: f64,
+        expiry: NaiveDate,
+        instruments: &[NfoInstrument],
+    ) -> anyhow::Result<Vec<(String, u32)>> {
+        let mut result = Vec::new();
+
+        // Generate target strikes around ATM
+        let mut target_strikes = vec![atm];
+        for i in 1..=config.strikes_around_atm {
+            target_strikes.push(atm + (i as f64) * config.strike_interval);
+            target_strikes.push(atm - (i as f64) * config.strike_interval);
+        }
+
+        info!("[AUTO-DISCOVERY] Looking for strikes: {:?}", target_strikes);
+
+        // Find matching instruments
+        for instr in instruments.iter()
+            .filter(|i| i.name == config.underlying)
+            .filter(|i| i.expiry == expiry)
+        {
+            if target_strikes.iter().any(|&s| (instr.strike - s).abs() < 0.01) {
+                info!(
+                    "[AUTO-DISCOVERY] Found: {} (token={}, strike={}, type={}, lot={})",
+                    instr.tradingsymbol, instr.instrument_token, instr.strike, instr.instrument_type, instr.lot_size
+                );
+                result.push((instr.tradingsymbol.clone(), instr.instrument_token));
+            }
+        }
+
+        if result.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No options found for {} at strikes {:?} expiry {}",
+                config.underlying, target_strikes, expiry
+            ));
+        }
+
+        // Sort by strike and type for consistent ordering
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+
+        info!("[AUTO-DISCOVERY] Discovered {} symbols for {}", result.len(), config.underlying);
+        Ok(result)
+    }
+
+    /// Resolve symbols - replace "AUTO" markers with actual discovered symbols
+    /// Markers: "NIFTY-AUTO", "BANKNIFTY-AUTO", "NIFTY-ATM", etc.
+    pub async fn resolve_symbols(&self, symbols: &[String]) -> anyhow::Result<Vec<(String, u32)>> {
+        let mut result = Vec::new();
+
+        for symbol in symbols {
+            let upper = symbol.to_uppercase();
+
+            if upper.contains("-AUTO") || upper.contains("-ATM") {
+                // Extract underlying name
+                let underlying = upper
+                    .replace("-AUTO", "")
+                    .replace("-ATM", "")
+                    .trim()
+                    .to_string();
+
+                let config = match underlying.as_str() {
+                    "NIFTY" => AutoDiscoveryConfig::nifty_atm(),
+                    "BANKNIFTY" => AutoDiscoveryConfig::banknifty_atm(),
+                    _ => AutoDiscoveryConfig {
+                        underlying: underlying.clone(),
+                        ..Default::default()
+                    },
+                };
+
+                match self.discover_symbols(&config).await {
+                    Ok(discovered) => {
+                        info!("[AUTO-DISCOVERY] Resolved {} -> {} symbols", symbol, discovered.len());
+                        result.extend(discovered);
+                    }
+                    Err(e) => {
+                        error!("[AUTO-DISCOVERY] Failed to discover {}: {}", symbol, e);
+                    }
+                }
+            } else {
+                // Regular symbol - will need token lookup later
+                result.push((symbol.clone(), 0));
+            }
+        }
+
+        Ok(result)
     }
 }

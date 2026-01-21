@@ -1,7 +1,8 @@
 [mode]
 execution = "paper"
-# ATM NIFTY options (25400 and 25450 strikes, today's expiry)
-symbols = ["NIFTY2612025400CE", "NIFTY2612025400PE", "NIFTY2612025450CE", "NIFTY2612025450PE"]
+# Auto-discover ATM NIFTY options for nearest weekly expiry
+# Supports: "NIFTY-ATM", "BANKNIFTY-ATM", "NIFTY-AUTO", or explicit symbols
+symbols = ["NIFTY-ATM"]
 
 [risk]
 max_order_value_usd = 100000.0

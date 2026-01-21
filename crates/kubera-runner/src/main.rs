@@ -17,7 +17,7 @@
 use kubera_core::{EventBus, ExecutionMode, Strategy, wal::WalWriter, connector::MarketConnector};
 use kubera_core::{TradingMetrics, MetricsConfig, TradeRecord};
 use kubera_data::Level2Book;
-use kubera_connectors::{BinanceConnector, ZerodhaConnector};
+use kubera_connectors::{BinanceConnector, ZerodhaConnector, ZerodhaAutoDiscovery};
 use kubera_executor::{SimulatedExchange, CommissionModel};
 use kubera_risk::{RiskEngine, RiskConfig};
 use kubera_options::nse_specs::{NseIndex, LotSizeValidator};
@@ -444,7 +444,39 @@ async fn async_main() -> anyhow::Result<()> {
             .collect();
 
         if !zerodha_symbols.is_empty() {
-            connectors.push(Box::new(ZerodhaConnector::new(bus.clone(), zerodha_symbols)));
+            // Check if any symbols need auto-discovery (contain "-AUTO" or "-ATM")
+            let needs_discovery = zerodha_symbols.iter()
+                .any(|s| s.to_uppercase().contains("-AUTO") || s.to_uppercase().contains("-ATM"));
+
+            let resolved_symbols = if needs_discovery {
+                info!("[RUNNER] Auto-discovering Zerodha symbols...");
+                match ZerodhaAutoDiscovery::from_sidecar() {
+                    Ok(discovery) => {
+                        // Run discovery asynchronously
+                        match discovery.resolve_symbols(&zerodha_symbols).await {
+                            Ok(resolved) => {
+                                let symbols: Vec<String> = resolved.iter().map(|(s, _)| s.clone()).collect();
+                                info!("[RUNNER] Auto-discovered {} symbols: {:?}", symbols.len(), symbols);
+                                symbols
+                            }
+                            Err(e) => {
+                                error!("[RUNNER] Auto-discovery failed: {}. Using original symbols.", e);
+                                zerodha_symbols.clone()
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("[RUNNER] Failed to initialize auto-discovery: {}. Using original symbols.", e);
+                        zerodha_symbols.clone()
+                    }
+                }
+            } else {
+                zerodha_symbols.clone()
+            };
+
+            if !resolved_symbols.is_empty() {
+                connectors.push(Box::new(ZerodhaConnector::new(bus.clone(), resolved_symbols)));
+            }
         }
 
         for connector in connectors {

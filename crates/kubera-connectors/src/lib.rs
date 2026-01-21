@@ -20,7 +20,7 @@ pub mod rest_client;
 pub mod zerodha;
 pub mod coindcx;
 
-pub use zerodha::ZerodhaConnector;
+pub use zerodha::{ZerodhaConnector, ZerodhaAutoDiscovery, AutoDiscoveryConfig, NfoInstrument};
 pub use coindcx::CoinDCXConnector;
 
 use async_trait::async_trait;
