@@ -33,6 +33,8 @@ pub mod replay;
 pub mod backtest;
 pub mod analytics;
 pub mod nse_specs;
+pub mod report;
+pub mod specs;
 
 pub use contract::{OptionContract, OptionType, OptionChain};
 pub use greeks::OptionGreeks;
