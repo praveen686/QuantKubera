@@ -28,6 +28,7 @@ use tracing::{info, error, warn};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod web_server;
 mod circuit_breakers;
+mod kitesim_backtest;
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
 use tokio::time::Duration;
