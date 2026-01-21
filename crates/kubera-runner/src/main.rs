@@ -241,6 +241,10 @@ enum Commands {
         #[arg(long)]
         orders: String,
 
+        /// Path to intents JSON (OrderIntentFile with scheduled timestamps). Overrides bulk orders mode.
+        #[arg(long)]
+        intents: Option<String>,
+
         /// Output directory for report.json
         #[arg(long, default_value = "artifacts/kitesim")]
         out: String,
@@ -385,6 +389,7 @@ async fn async_main() -> anyhow::Result<()> {
                 strategy,
                 replay,
                 orders,
+                intents,
                 out,
                 timeout_ms,
                 latency_ms,
@@ -400,6 +405,7 @@ async fn async_main() -> anyhow::Result<()> {
                         strategy_name: strategy,
                         replay_path: replay,
                         orders_path: orders,
+                        intents_path: intents,
                         out_dir: out,
                         timeout_ms,
                         latency_ms,

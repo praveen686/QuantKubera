@@ -2,17 +2,17 @@
 //!
 //! Provides a CLI-friendly entrypoint:
 //! - load replay events (JSONL of QuoteEvent)
-//! - load orders (JSON)
+//! - load orders (JSON) or intents (JSON with timestamps)
 //! - execute sequentially through MultiLegCoordinator
 //! - emit report.json, fills.jsonl, pnl.json
 
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use kubera_options::execution::{LegSide, LegStatus};
+use kubera_options::execution::{LegSide, LegStatus, MultiLegOrder};
 use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLegCoordinator};
 use kubera_options::replay::{QuoteEvent, ReplayEvent, ReplayFeed};
 use kubera_options::report::{BacktestReport, FillMetrics};
@@ -21,12 +21,28 @@ use kubera_options::specs::SpecStore;
 use crate::binance_exchange_info::fetch_spot_specs;
 use crate::order_io::OrderFile;
 
+/// Scheduled order intent with timestamp
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OrderIntent {
+    /// RFC3339 timestamp (UTC) at which the order should be placed
+    pub ts: String,
+    pub order: MultiLegOrder,
+}
+
+/// File format for scheduled intents
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OrderIntentFile {
+    pub strategy_name: String,
+    pub intents: Vec<OrderIntent>,
+}
+
 pub struct KiteSimCliConfig {
     pub venue: String,
     pub qty_scale: u32,
     pub strategy_name: String,
     pub replay_path: String,
     pub orders_path: String,
+    pub intents_path: Option<String>,
     pub out_dir: String,
     pub timeout_ms: i64,
     pub latency_ms: i64,
@@ -34,6 +50,10 @@ pub struct KiteSimCliConfig {
     pub adverse_bps: f64,
     pub stale_quote_ms: i64,
     pub hedge_on_failure: bool,
+}
+
+fn parse_rfc3339_utc(s: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(s)?.with_timezone(&Utc))
 }
 
 /// Load JSONL quotes. Each line must be a QuoteEvent JSON object.
@@ -57,17 +77,35 @@ pub fn load_orders_json(path: &Path) -> Result<OrderFile> {
     Ok(of)
 }
 
+pub fn load_intents_json(path: &Path) -> Result<OrderIntentFile> {
+    let s = std::fs::read_to_string(path).with_context(|| format!("read intents file: {:?}", path))?;
+    let intf: OrderIntentFile = serde_json::from_str(&s).with_context(|| "parse OrderIntentFile JSON")?;
+    Ok(intf)
+}
+
 pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
     let replay_path = Path::new(&cfg.replay_path);
     let orders_path = Path::new(&cfg.orders_path);
     let out_dir = Path::new(&cfg.out_dir);
 
     let replay_events = load_quotes_jsonl(replay_path)?;
+
+    // Determine if using intents or bulk orders
+    let use_intents = cfg.intents_path.is_some();
+    let intents_file = if let Some(ref ip) = cfg.intents_path {
+        Some(load_intents_json(Path::new(ip))?)
+    } else {
+        None
+    };
     let order_file = load_orders_json(orders_path)?;
 
     // Use CLI strategy label if provided; otherwise trust file.
     let strategy_name = if cfg.strategy_name.trim().is_empty() {
-        order_file.strategy_name.clone()
+        if use_intents {
+            intents_file.as_ref().map(|f| f.strategy_name.clone()).unwrap_or_else(|| order_file.strategy_name.clone())
+        } else {
+            order_file.strategy_name.clone()
+        }
     } else {
         cfg.strategy_name.clone()
     };
@@ -82,14 +120,21 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
 
     // Build SpecStore with venue-specific specs
     let mut specs = SpecStore::new();
-    if cfg.venue.to_lowercase() == "binance" {
-        // Collect all symbols from orders
-        let symbols: std::collections::HashSet<String> = order_file
-            .orders
-            .iter()
-            .flat_map(|o| o.legs.iter().map(|l| l.tradingsymbol.clone()))
-            .collect();
 
+    // Collect all symbols from orders or intents
+    let symbols: std::collections::HashSet<String> = if use_intents {
+        intents_file.as_ref()
+            .map(|f| f.intents.iter()
+                .flat_map(|i| i.order.legs.iter().map(|l| l.tradingsymbol.clone()))
+                .collect())
+            .unwrap_or_default()
+    } else {
+        order_file.orders.iter()
+            .flat_map(|o| o.legs.iter().map(|l| l.tradingsymbol.clone()))
+            .collect()
+    };
+
+    if cfg.venue.to_lowercase() == "binance" {
         // Fetch real tick_size and qty_scale from Binance exchangeInfo
         match fetch_spot_specs(&symbols) {
             Ok(specs_map) => {
@@ -99,7 +144,6 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
             }
             Err(e) => {
                 eprintln!("WARN: fetch_spot_specs failed ({}), using CLI defaults", e);
-                // Fallback: use CLI-provided qty_scale with placeholder tick
                 let tick = 0.01_f64;
                 for sym in &symbols {
                     specs.insert_with_scale(sym, 1, tick, cfg.qty_scale);
@@ -117,10 +161,39 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
     let mut feed = ReplayFeed::new(replay_events);
     let mut all_results = Vec::new();
 
-    for order in order_file.orders.iter() {
-        let mut coord = MultiLegCoordinator::new(&mut sim, policy.clone());
-        let res = coord.execute_with_feed(order, &mut feed).await;
-        all_results.push(res);
+    if use_intents {
+        // Scheduled intents mode: advance feed to each intent timestamp
+        let intf = intents_file.as_ref().unwrap();
+        let mut intents: Vec<_> = intf.intents.iter().collect();
+        intents.sort_by_key(|i| parse_rfc3339_utc(&i.ts).ok());
+
+        for intent in intents {
+            let target_ts = parse_rfc3339_utc(&intent.ts)?;
+
+            // Advance replay feed to intent time (consume events strictly before target_ts)
+            loop {
+                let should_consume = feed.peek().map(|ev| ev.ts() < target_ts).unwrap_or(false);
+                if !should_consume {
+                    break;
+                }
+                if let Some(ev) = feed.next() {
+                    sim.ingest_event(&ev);
+                }
+            }
+
+            // Set simulator clock to intent time and execute
+            sim.set_now(target_ts);
+            let mut coord = MultiLegCoordinator::new(&mut sim, policy.clone());
+            let res = coord.execute_with_feed(&intent.order, &mut feed).await;
+            all_results.push(res);
+        }
+    } else {
+        // Bulk orders mode (original behavior)
+        for order in order_file.orders.iter() {
+            let mut coord = MultiLegCoordinator::new(&mut sim, policy.clone());
+            let res = coord.execute_with_feed(order, &mut feed).await;
+            all_results.push(res);
+        }
     }
 
     let stats = sim.stats();
@@ -159,7 +232,11 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
     report.dataset = replay_path.to_string_lossy().to_string();
     report.fill = fill;
     report.notes.push(format!("strategy={}", strategy_name));
-    report.notes.push(format!("orders_file={}", orders_path.to_string_lossy()));
+    if use_intents {
+        report.notes.push(format!("intents_file={}", cfg.intents_path.as_ref().unwrap()));
+    } else {
+        report.notes.push(format!("orders_file={}", orders_path.to_string_lossy()));
+    }
     report.notes.push(format!("venue={}", cfg.venue));
     report.notes.push(format!("qty_scale={}", cfg.qty_scale));
 
@@ -177,11 +254,19 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
         writeln!(fills_file, "{}", line)?;
     }
 
-    // Simple PnL: only meaningful for Binance Spot smoke tests (single symbol, USDT quote).
+    // Simple PnL calculation for Binance Spot
     if cfg.venue.to_lowercase() == "binance" {
         let mut per_symbol = std::collections::HashMap::<String, f64>::new();
         let scale = (cfg.qty_scale as f64).max(1.0);
-        for (order, res) in order_file.orders.iter().zip(all_results.iter()) {
+
+        // Get orders from either intents or order_file
+        let orders: Vec<&MultiLegOrder> = if use_intents {
+            intents_file.as_ref().unwrap().intents.iter().map(|i| &i.order).collect()
+        } else {
+            order_file.orders.iter().collect()
+        };
+
+        for (order, res) in orders.iter().zip(all_results.iter()) {
             for (leg, leg_res) in order.legs.iter().zip(res.leg_results.iter()) {
                 if leg_res.status != LegStatus::Filled {
                     continue;

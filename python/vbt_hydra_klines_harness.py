@@ -501,6 +501,141 @@ def run_hydra_quicktest(
         )
 
 
+def emit_intents_json(
+    out_path: Path,
+    strategy_name: str,
+    symbol: str,
+    exchange: str,
+    entries: pd.Series,
+    exits: pd.Series,
+    quantity_u32: int,
+) -> None:
+    """
+    Emit an OrderIntentFile JSON compatible with kubera-runner backtest-kitesim --intents.
+    Each entry/exit signal becomes a timestamped intent.
+    """
+    intents = []
+
+    # Find entry points (signal goes True)
+    entry_times = entries.index[entries].tolist()
+    for ts in entry_times:
+        intents.append({
+            "ts": ts.isoformat(),
+            "order": {
+                "strategy_name": strategy_name,
+                "legs": [{
+                    "tradingsymbol": symbol,
+                    "exchange": exchange,
+                    "side": "Buy",
+                    "quantity": int(quantity_u32),
+                    "order_type": "Market",
+                    "price": None,
+                }],
+                "total_margin_required": 0.0,
+            }
+        })
+
+    # Find exit points (signal goes True)
+    exit_times = exits.index[exits].tolist()
+    for ts in exit_times:
+        intents.append({
+            "ts": ts.isoformat(),
+            "order": {
+                "strategy_name": strategy_name,
+                "legs": [{
+                    "tradingsymbol": symbol,
+                    "exchange": exchange,
+                    "side": "Sell",
+                    "quantity": int(quantity_u32),
+                    "order_type": "Market",
+                    "price": None,
+                }],
+                "total_margin_required": 0.0,
+            }
+        })
+
+    # Sort by timestamp
+    intents.sort(key=lambda x: x["ts"])
+
+    payload = {"strategy_name": strategy_name, "intents": intents}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2))
+
+
+def run_hydra_quicktest_with_intents(
+    ohlcv: pd.DataFrame,
+    fees_bps: float,
+    slippage_bps: float,
+    out_dir: Path,
+    threshold: float,
+    emit_intents: bool,
+    intents_out: Optional[Path],
+    orders_qty_base: float,
+    venue_exchange: str,
+) -> None:
+    """
+    HYDRA-lite quick test with scheduled intents output.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    close = ohlcv["close"]
+    experts = hydra_experts(ohlcv)
+    score = hydra_ensemble_score(experts)
+
+    entries, exits = score_to_signals(score, threshold=threshold)
+
+    fees = (fees_bps + slippage_bps) / 1e4
+    pf = vbt.Portfolio.from_signals(close, entries, exits, fees=fees, freq="1T")
+
+    # artifacts
+    experts.to_csv(out_dir / "experts.csv", index_label="ts")
+    pd.DataFrame({"close": close, "hydra_score": score}).to_csv(out_dir / "score.csv", index_label="ts")
+    pd.DataFrame({"entry": entries.astype(int), "exit": exits.astype(int)}).to_csv(out_dir / "signals.csv", index_label="ts")
+
+    eq = pd.DataFrame({"close": close, "equity": pf.value})
+    eq.to_csv(out_dir / "equity.csv", index_label="ts")
+
+    summary = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "engine": "vectorbtpro",
+        "mode": "hydra_lite",
+        "fees_bps": fees_bps,
+        "slippage_bps": slippage_bps,
+        "threshold": threshold,
+        "stats": _pf_stats(pf),
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+    if emit_intents:
+        if intents_out is None:
+            intents_out = out_dir / "intents.json"
+
+        # Check if there are any signals
+        if not entries.any() and not exits.any():
+            print("[WARN] No entry/exit signals found; intents.json not emitted.")
+            return
+
+        # Determine qty_scale from exchangeInfo
+        try:
+            _, step = fetch_binance_exchangeinfo_specs(symbol=str(ohlcv.attrs.get("symbol", "BTCUSDT")))
+        except Exception:
+            step = 1.0
+        scale = qty_scale_from_step(step)
+        qty_u32 = int(round(orders_qty_base * scale))
+        if qty_u32 <= 0:
+            qty_u32 = scale
+
+        emit_intents_json(
+            out_path=intents_out,
+            strategy_name=summary.get("mode", "HYDRA_LITE").upper(),
+            symbol=str(ohlcv.attrs.get("symbol", "BTCUSDT")),
+            exchange=venue_exchange,
+            entries=entries,
+            exits=exits,
+            quantity_u32=qty_u32,
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", required=True, help="e.g., BTCUSDT")
@@ -515,7 +650,9 @@ def main() -> int:
     ap.add_argument("--mode", default="hydra", choices=["hydra", "baselines"], help="Run HYDRA-lite or baseline strategies")
     ap.add_argument("--threshold", type=float, default=0.15, help="HYDRA score threshold for long entry")
     ap.add_argument("--emit-orders", action="store_true", help="Emit orders.json compatible with backtest-kitesim (single-leg intent)")
+    ap.add_argument("--emit-intents", action="store_true", help="Emit intents.json with timestamped entry/exit orders for scheduled execution")
     ap.add_argument("--orders-out", default=None, help="Path to write orders.json (default: <out_dir>/orders.json)")
+    ap.add_argument("--intents-out", default=None, help="Path to write intents.json (default: <out_dir>/intents.json)")
     ap.add_argument("--orders-qty-base", type=float, default=0.001, help="Base quantity for orders (e.g., 0.001 BTC). Will be quantized by stepSize.")
     ap.add_argument("--venue-exchange", default="BINANCE", help="Exchange field to put into LegOrder.exchange")
 
@@ -545,6 +682,19 @@ def main() -> int:
 
     if args.mode == 'baselines':
         run_baselines(df, fees_bps=args.fees_bps, slippage_bps=args.slippage_bps, out_dir=out_dir)
+    elif args.emit_intents:
+        intents_out = Path(args.intents_out) if args.intents_out is not None else None
+        run_hydra_quicktest_with_intents(
+            df,
+            fees_bps=args.fees_bps,
+            slippage_bps=args.slippage_bps,
+            out_dir=out_dir,
+            threshold=args.threshold,
+            emit_intents=True,
+            intents_out=intents_out,
+            orders_qty_base=args.orders_qty_base,
+            venue_exchange=args.venue_exchange,
+        )
     else:
         orders_out = Path(args.orders_out) if args.orders_out is not None else None
         run_hydra_quicktest(
@@ -561,6 +711,8 @@ def main() -> int:
     print(f"[OK] Wrote artifacts to: {out_dir}")
     if args.emit_orders:
         print("[OK] orders.json emitted (if score exceeded threshold).")
+    if args.emit_intents:
+        print("[OK] intents.json emitted (if signals found).")
     return 0
 
 

@@ -135,6 +135,18 @@ impl KiteSim {
         self.now
     }
 
+    /// Set the simulator clock to a specific time (for scheduled intents).
+    pub fn set_now(&mut self, ts: DateTime<Utc>) {
+        self.now = ts;
+    }
+
+    /// Ingest a replay event (updates book state without advancing clock).
+    pub fn ingest_event(&mut self, event: &ReplayEvent) {
+        match event {
+            ReplayEvent::Quote(q) => self.on_quote(q.clone()),
+        }
+    }
+
     /// Returns collected stress statistics (Patch 3).
     pub fn stats(&self) -> KiteSimRunStats {
         self.stats.clone()
