@@ -86,6 +86,8 @@ struct SimOrder {
     status: LegStatus,
     created_ts: DateTime<Utc>,
     eligible_ts: DateTime<Utc>,
+    /// Mid price at order placement (Patch 3: for adverse selection).
+    mid_at_place: f64,
 }
 
 impl SimOrder {
@@ -100,6 +102,7 @@ pub struct KiteSim {
     specs: Option<SpecStore>,
     last_quotes: HashMap<String, Quote>,
     orders: HashMap<String, SimOrder>,
+    stats: KiteSimRunStats,
     next_id: AtomicU64,
     /// Current simulation time (public for Patch 2 stats wiring).
     pub now: DateTime<Utc>,
@@ -112,6 +115,7 @@ impl KiteSim {
             specs: None,
             last_quotes: HashMap::new(),
             orders: HashMap::new(),
+            stats: KiteSimRunStats::default(),
             next_id: AtomicU64::new(1),
             now: Utc::now(),
         }
@@ -127,11 +131,63 @@ impl KiteSim {
         self.now
     }
 
-    /// Patch 2 hook: attempt final reconciliation for timeout / race simulation.
-    /// Returns Some(result) if order was filled during the cancel window.
-    pub fn final_reconcile(&mut self, _order_id: &str) -> Option<LegExecutionResult> {
-        // Stub: Patch 3 will implement "filled while cancelling" behavior.
-        None
+    /// Returns collected stress statistics (Patch 3).
+    pub fn stats(&self) -> KiteSimRunStats {
+        self.stats.clone()
+    }
+
+    /// Calculate mid price from quote.
+    fn mid(q: &Quote) -> f64 {
+        (q.bid + q.ask) * 0.5
+    }
+
+    /// Apply adverse selection when mid moves against the order (Patch 3).
+    /// Returns adjusted fill price.
+    fn adverse_adjust(&self, px: f64, side: LegSide, mid0: f64, mid1: f64) -> f64 {
+        if self.cfg.adverse_selection_max_bps <= 0.0 || mid0 <= 0.0 {
+            return px;
+        }
+        // Measure mid movement in bps
+        let mv = ((mid1 - mid0) / mid0) * 10000.0;
+        // Harmful move: up for buys, down for sells
+        let harm = match side {
+            LegSide::Buy => mv.max(0.0),
+            LegSide::Sell => (-mv).max(0.0),
+        };
+        let bps = harm.min(self.cfg.adverse_selection_max_bps) / 10000.0;
+        match side {
+            LegSide::Buy => px * (1.0 + bps),
+            LegSide::Sell => px * (1.0 - bps),
+        }
+    }
+
+    /// Record slippage sample in bps (Patch 3).
+    fn record_slip(&mut self, side: LegSide, fill_px: f64, mid: f64) {
+        if mid <= 0.0 { return; }
+        let bps = match side {
+            LegSide::Buy => ((fill_px - mid) / mid) * 10000.0,
+            LegSide::Sell => ((mid - fill_px) / mid) * 10000.0,
+        };
+        if bps.is_finite() {
+            self.stats.slippage_samples_bps.push(bps);
+        }
+    }
+
+    /// Attempt final reconciliation for timeout / race simulation (Patch 3).
+    /// Returns Some(result) if order reached terminal state.
+    pub fn final_reconcile(&mut self, order_id: &str) -> Option<LegExecutionResult> {
+        // Attempt one more match before returning terminal state
+        if let Some(o) = self.orders.get(order_id) {
+            let sym = o.tradingsymbol.clone();
+            self.match_eligible_orders_for(&sym);
+        }
+        self.orders.get(order_id).map(|o| LegExecutionResult {
+            tradingsymbol: o.tradingsymbol.clone(),
+            order_id: Some(order_id.to_string()),
+            status: o.status,
+            fill_price: o.avg_price,
+            error: None,
+        })
     }
 
     /// Advances simulator time and processes a single replay event.
@@ -161,6 +217,11 @@ impl KiteSim {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let order_id = format!("SIM-{}", id);
 
+        // Capture mid price at placement for adverse selection (Patch 3)
+        let mid_at_place = self.last_quotes.get(&leg.tradingsymbol)
+            .map(|q| Self::mid(q))
+            .unwrap_or(0.0);
+
         let eligible_ts = ts + self.cfg.latency;
         let order = SimOrder {
             order_id: order_id.clone(),
@@ -174,6 +235,7 @@ impl KiteSim {
             status: LegStatus::Placed,
             created_ts: ts,
             eligible_ts,
+            mid_at_place,
         };
 
         self.orders.insert(order_id.clone(), order);
@@ -227,30 +289,38 @@ impl KiteSim {
     }
 
     fn try_fill_order(&mut self, order_id: &str, q: Quote) {
-        let Some(o) = self.orders.get_mut(order_id) else { return; };
-        let rem = o.remaining();
+        // Extract order info to avoid borrow conflicts
+        let (rem, side, order_type, limit_price, mid_at_place, filled_qty, avg_price) = {
+            let Some(o) = self.orders.get(order_id) else { return; };
+            (o.remaining(), o.side, o.order_type, o.limit_price, o.mid_at_place, o.filled_qty, o.avg_price)
+        };
+
         if rem == 0 {
-            o.status = LegStatus::Filled;
+            if let Some(o) = self.orders.get_mut(order_id) {
+                o.status = LegStatus::Filled;
+            }
             return;
         }
 
         // Determine executable price and visible quantity.
-        let (px, visible_qty) = match o.side {
+        let (px, visible_qty) = match side {
             LegSide::Buy => (q.ask, q.ask_qty),
             LegSide::Sell => (q.bid, q.bid_qty),
         };
 
         // Limit price check.
-        if o.order_type == LegOrderType::Limit {
-            if let Some(lim) = o.limit_price {
-                match o.side {
+        if order_type == LegOrderType::Limit {
+            if let Some(lim) = limit_price {
+                match side {
                     LegSide::Buy if px > lim => return,
                     LegSide::Sell if px < lim => return,
                     _ => {}
                 }
             } else {
                 // Malformed: limit order without price.
-                o.status = LegStatus::Rejected;
+                if let Some(o) = self.orders.get_mut(order_id) {
+                    o.status = LegStatus::Rejected;
+                }
                 return;
             }
         }
@@ -271,22 +341,32 @@ impl KiteSim {
 
         // Apply pessimistic slippage for taker-style fills.
         let slip = px * (self.cfg.taker_slippage_bps / 10_000.0);
-        let fill_px = match o.side {
+        let base_px = match side {
             LegSide::Buy => px + slip,
             LegSide::Sell => px - slip,
         };
 
-        // Update VWAP.
-        let prev_notional = o.avg_price.unwrap_or(0.0) * (o.filled_qty as f64);
-        let add_notional = fill_px * (fill_qty as f64);
-        let new_filled = o.filled_qty + fill_qty;
-        o.avg_price = Some((prev_notional + add_notional) / (new_filled as f64));
-        o.filled_qty = new_filled;
+        // Apply adverse selection (Patch 3): penalize when mid moved against order
+        let mid_now = Self::mid(&q);
+        let fill_px = self.adverse_adjust(base_px, side, mid_at_place, mid_now);
 
-        if o.filled_qty == o.qty {
-            o.status = LegStatus::Filled;
-        } else {
-            o.status = LegStatus::PartiallyFilled;
+        // Record slippage sample (Patch 3)
+        self.record_slip(side, fill_px, mid_now);
+
+        // Update VWAP.
+        let prev_notional = avg_price.unwrap_or(0.0) * (filled_qty as f64);
+        let add_notional = fill_px * (fill_qty as f64);
+        let new_filled = filled_qty + fill_qty;
+
+        if let Some(o) = self.orders.get_mut(order_id) {
+            o.avg_price = Some((prev_notional + add_notional) / (new_filled as f64));
+            o.filled_qty = new_filled;
+
+            if o.filled_qty == o.qty {
+                o.status = LegStatus::Filled;
+            } else {
+                o.status = LegStatus::PartiallyFilled;
+            }
         }
     }
 }
