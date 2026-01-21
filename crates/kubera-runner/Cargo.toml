@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
 kubera-core = { path = "../kubera-core" }
 kubera-data = { path = "../kubera-data" }
 kubera-models = { path = "../kubera-models" }

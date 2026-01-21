@@ -30,6 +30,7 @@ mod web_server;
 mod circuit_breakers;
 mod kitesim_backtest;
 mod order_io;
+mod binance_capture;
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
 use tokio::time::Duration;
@@ -202,6 +203,21 @@ use crossterm::{
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Capture Binance Spot bookTicker stream into QuoteEvent JSONL.
+    CaptureBinance {
+        /// Symbol, e.g. BTCUSDT
+        #[arg(long)]
+        symbol: String,
+
+        /// Output path, e.g. data/replay/BINANCE/BTCUSDT/quotes.jsonl
+        #[arg(long)]
+        out: String,
+
+        /// Capture duration in seconds
+        #[arg(long, default_value_t = 300)]
+        duration_secs: u64,
+    },
+
     /// Offline KiteSim backtest runner (Mode B/C).
     BacktestKitesim {
         /// Strategy label (for report metadata only). If empty, uses orders file.
@@ -344,6 +360,16 @@ async fn async_main() -> anyhow::Result<()> {
     // Handle subcommands first
     if let Some(cmd) = args.command {
         match cmd {
+            Commands::CaptureBinance { symbol, out, duration_secs } => {
+                let out_path = std::path::Path::new(&out);
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                println!("Capturing Binance {} bookTicker for {} seconds...", symbol, duration_secs);
+                binance_capture::capture_book_ticker_jsonl(&symbol, out_path, duration_secs).await?;
+                println!("Capture complete: {}", out);
+                return Ok(());
+            }
             Commands::BacktestKitesim {
                 strategy,
                 replay,
