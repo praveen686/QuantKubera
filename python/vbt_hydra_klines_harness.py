@@ -196,9 +196,9 @@ def run_baselines(
     # Save equity curves
     eq = pd.DataFrame({
         "close": close,
-        "mom_equity": pf_mom.value(),
-        "mr_equity": pf_mr.value(),
-        "vm_equity": pf_vm.value(),
+        "mom_equity": pf_mom.value,
+        "mr_equity": pf_mr.value,
+        "vm_equity": pf_vm.value,
     })
     eq.to_csv(out_dir / "equity.csv", index_label="ts")
 
