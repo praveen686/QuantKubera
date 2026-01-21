@@ -1,0 +1,37 @@
+[package]
+name = "kubera-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-models = { path = "../kubera-models" }
+kubera-options = { path = "../kubera-options" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+axum = { workspace = true }
+opentelemetry = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-stdout = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+kubera-sbe = { path = "../kubera-sbe" }
+proptest = "1.4"
+
+[[bench]]
+name = "benchmark_core"
+harness = false

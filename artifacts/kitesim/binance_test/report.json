@@ -1,0 +1,25 @@
+{
+  "created_at": "2026-01-21T12:33:58.534973588Z",
+  "engine": "KiteSim",
+  "venue": "NSE-Zerodha-Sim",
+  "dataset": "data/replay/binance/quotes.jsonl",
+  "fill": {
+    "orders_total": 2,
+    "legs_total": 2,
+    "legs_filled": 2,
+    "legs_partially_filled": 0,
+    "legs_rejected": 0,
+    "legs_cancelled": 0,
+    "rollbacks": 0,
+    "timeouts": 0,
+    "hedges_attempted": 0,
+    "hedges_filled": 0,
+    "slippage_bps_p50": 0.0005659823662145444,
+    "slippage_bps_p90": 0.0005659823662145444,
+    "slippage_bps_p99": 0.0005659823662145444
+  },
+  "notes": [
+    "strategy=BINANCE_SMOKE",
+    "orders_file=data/orders/binance_smoke/orders.json"
+  ]
+}

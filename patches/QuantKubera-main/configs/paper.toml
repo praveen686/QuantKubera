@@ -1,0 +1,39 @@
+[mode]
+execution = "paper"
+# ATM NIFTY options (25400 and 25450 strikes, today's expiry)
+symbols = ["NIFTY2612025400CE", "NIFTY2612025400PE", "NIFTY2612025450CE", "NIFTY2612025450PE"]
+
+[risk]
+max_order_value_usd = 100000.0
+max_notional_per_symbol_usd = 200000.0
+
+[execution]
+simulated = true
+slippage_bps = 2.0
+commission_model = "ZerodhaFnO"
+
+[strategy.aeon]
+# Informational Gating (BIF)
+entropy_word_len = 4
+mi_word_len = 4
+lookback = 64
+bif_predictability_threshold = 0.38
+
+# Structural Gating (FTI)
+fti_min_period = 5
+fti_max_period = 65
+fti_half_length = 32
+fti_beta = 0.9
+fti_noise_cut = 0.2
+fti_trend_threshold = 3.56
+fti_mean_rev_threshold = 0.80
+
+[strategy.hydra]
+venue = "ZerodhaFnO"
+learning_rate = 0.05
+zscore_action_threshold = 1.5
+position_hysteresis = 0.15
+lambda_risk = 0.6
+edge_hurdle_multiplier = 0.7
+slippage_bps = 2.0
+commission_bps = 4.0

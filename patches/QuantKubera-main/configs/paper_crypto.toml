@@ -1,0 +1,34 @@
+[mode]
+execution = "paper"
+symbols = ["BTCUSDT"]
+
+[risk]
+max_order_value_usd = 2000000.0
+max_notional_per_symbol_usd = 5000000.0
+
+[execution]
+simulated = true
+slippage_bps = 0.5
+commission_model = "Linear"
+
+[strategy.hydra]
+venue = "BinanceFutures"
+learning_rate = 0.01
+zscore_action_threshold = 2.5
+position_hysteresis = 0.5
+lambda_risk = 0.7
+
+# ========== BINANCE TUNING PATCH ==========
+# Cost model (aligned with real execution)
+slippage_bps = 0.5
+commission_bps = 2.0
+latency_slippage_bps = 5.0       # Observed ~5bps signal→fill drift
+include_spread_in_cost = true
+
+# Edge requirements
+edge_hurdle_multiplier = 2.5    # Higher multiplier for safety
+min_edge_bps = 10.0             # Minimum 10bps edge required
+
+# Time-based throttles (prevent churn)
+min_ms_between_signals = 5000   # 5 seconds between signals
+min_ms_hold = 5000              # 5 seconds minimum hold

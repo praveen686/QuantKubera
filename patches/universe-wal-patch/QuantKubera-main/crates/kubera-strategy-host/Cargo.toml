@@ -1,0 +1,15 @@
+[package]
+name = "kubera-strategy-host"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-core = { path = "../kubera-core" }
+kubera-models = { path = "../kubera-models" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }

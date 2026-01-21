@@ -1,0 +1,33 @@
+{
+  "strategy_name": "BINANCE_SMOKE",
+  "orders": [
+    {
+      "strategy_name": "BINANCE_SMOKE",
+      "legs": [
+        {
+          "tradingsymbol": "BTCUSDT",
+          "exchange": "BINANCE",
+          "side": "Buy",
+          "quantity": 1,
+          "order_type": "Market",
+          "price": null
+        }
+      ],
+      "total_margin_required": 0.0
+    },
+    {
+      "strategy_name": "BINANCE_SMOKE",
+      "legs": [
+        {
+          "tradingsymbol": "BTCUSDT",
+          "exchange": "BINANCE",
+          "side": "Sell",
+          "quantity": 1,
+          "order_type": "Market",
+          "price": null
+        }
+      ],
+      "total_margin_required": 0.0
+    }
+  ]
+}

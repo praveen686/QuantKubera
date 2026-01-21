@@ -1,0 +1,111 @@
+{
+    "annotations": {
+        "list": [
+            {
+                "builtIn": 1,
+                "datasource": "-- Grafana --",
+                "enable": true,
+                "hide": true,
+                "iconColor": "rgba(0, 211, 255, 1)",
+                "name": "Annotations & Alerts",
+                "type": "dashboard"
+            }
+        ]
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 0,
+    "id": null,
+    "links": [],
+    "liveNow": false,
+    "panels": [
+        {
+            "title": "Ingestion Latency (p90)",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.9, sum by (le, symbol, type) (rate(kubera_ingestion_latency_ms_bucket[1m])))",
+                    "legendFormat": "{{symbol}} - {{type}}"
+                }
+            ]
+        },
+        {
+            "title": "Strategy Decision Latency (p90)",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.9, sum by (le, symbol, hook) (rate(kubera_strategy_decision_latency_ms_bucket[1m])))",
+                    "legendFormat": "{{symbol}} - {{hook}}"
+                }
+            ]
+        },
+        {
+            "title": "Message Throughput",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "expr": "sum by (symbol) (rate(kubera_ingestion_messages_total[1m]))",
+                    "legendFormat": "{{symbol}}"
+                }
+            ]
+        },
+        {
+            "title": "Event Bus Queue Depths",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 8
+            },
+            "targets": [
+                {
+                    "expr": "kubera_bus_orders_queue_depth",
+                    "legendFormat": "Orders Queue"
+                },
+                {
+                    "expr": "kubera_bus_signals_queue_depth",
+                    "legendFormat": "Signals Queue"
+                }
+            ]
+        }
+    ],
+    "refresh": "5s",
+    "schemaVersion": 36,
+    "style": "dark",
+    "tags": [
+        "quantkubera",
+        "trading"
+    ],
+    "templating": {
+        "list": []
+    },
+    "time": {
+        "from": "now-6h",
+        "to": "now"
+    },
+    "timepicker": {},
+    "timezone": "",
+    "title": "QuantKubera Fleet Metrics",
+    "uid": "quantkubera-fleet",
+    "version": 1,
+    "weekStart": ""
+}

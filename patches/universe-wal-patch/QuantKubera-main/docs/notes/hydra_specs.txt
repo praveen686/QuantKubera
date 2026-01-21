@@ -1,0 +1,324 @@
+Flagship Strategy: KUBERA HYDRA
+
+A self-evolving, regime-aware, multi-expert portfolio that blends multiple orthogonal alpha engines (trend, mean-reversion, carry/volatility, microstructure) and uses an online meta-allocator to continuously reweight them based on real PnL attribution, risk, and execution quality.
+
+Core Idea
+
+Treat each alpha engine as an “expert.” The system runs all experts in parallel, attributes PnL and risk to each, and uses online learning (with strict risk constraints) to allocate capital dynamically across them. This is how you convert “I know many strategies” into a single coherent machine.
+
+1) Strategy Stack (Experts)
+
+You will implement 5 expert families (not 50 indicators). Each family is a module with: signals → sizing → order style → exit logic → attribution tags.
+
+Expert A: Multi-Timeframe Trend (Robust CTA-style)
+
+Signals: breakout + moving-average slope + volatility-adjusted momentum
+
+Timeframes: 5m / 15m / 1h (bars), optionally daily for context
+
+Key: volatility targeting + strict stop structure + time-based exits
+
+Where it shines: directional days, post-event drift, macro regimes
+
+Expert B: Mean Reversion (Intraday)
+
+Signals: z-score of price vs VWAP, Bollinger mean reversion, liquidity vacuum snaps
+
+Timeframes: tick/1m/5m
+
+Key: only when microstructure and volatility regime permit (avoid “catching knives”)
+
+Where it shines: choppy markets, range days, post-spike normalization
+
+Expert C: Volatility & Convexity Harvester (FnO + Crypto options where available)
+
+Signals: realized vs implied gap, volatility clustering, term-structure and skew features (when available)
+
+Positions: conservative structures (spreads, defined risk) or delta-hedged overlays
+
+Key: always margin-aware; hard exposure caps; scenario-based risk
+
+Where it shines: volatility regimes, event premia mispricings
+
+Expert D: Microstructure / Order-Flow (Tick-level)
+
+Signals: order-flow imbalance, trade intensity, short-term impact model, queue dynamics (if depth available)
+
+Timeframes: tick / 1s
+
+Key: very strict cost model; only trade when edge > fees+slip+impact
+
+Where it shines: liquid products with stable microstructure
+
+Expert E: Cross-Venue / Cross-Asset Relative Value
+
+Signals: basis, lead-lag, correlated spread z-scores, funding/carry (crypto)
+
+Key: neutrality constraints; hedge ratios; inventory control
+
+Where it shines: dislocations, temporary basis moves, correlation breakdowns
+
+Important: not all venues support all experts equally. QuantKubera’s meta-controller routes capital where the expert’s expected edge net of costs is highest.
+
+2) Regime Engine (Gating Layer)
+
+Before any expert is allowed to trade size, it passes through a regime filter that answers:
+
+Market state: trend / range / high-vol / low-vol / event / illiquid
+
+Microstructure state: normal fills vs toxic flow vs widened spreads
+
+Execution state: current latency/slippage/reject rates (from observability)
+
+Implementation (robust and buildable)
+
+Regime classifier: HMM or a lightweight classifier (logistic/GBDT) trained on:
+
+realized volatility (multi-horizon)
+
+autocorrelation / Hurst proxy
+
+trend strength (ADX-like)
+
+jump detection (bipower variation / threshold returns)
+
+volume/flow surprises (VPIN-like if you already use it)
+
+Change-point detection: online Bayesian change-point or CUSUM on volatility + spread + returns
+
+Output: RegimeState { id, confidence, risk_multiplier, allowed_experts[] }
+
+Regime doesn’t “predict direction.” It controls what playbook is allowed and how much risk to deploy.
+
+3) Meta-Allocator (Self-Evolving Core)
+
+This is the heart of HYDRA. It converts feedback into evolution.
+
+3.1 Expert-as-Asset Portfolio
+
+Each expert produces:
+
+expected return proxy (short-horizon forecast or score)
+
+realized PnL attribution (from fills)
+
+risk usage (VaR/ES proxy, drawdown contribution)
+
+execution cost (slippage, fees, adverse selection proxy)
+
+You maintain per-expert state:
+
+edge_net = pnl - fees - slippage - impact_estimate
+
+quality = fill_ratio, reject_rate, latency_penalty
+
+stability = rolling sharpe, drawdown, tail loss
+
+3.2 Online Weight Update (No Hand-Waving)
+
+Use Exponentiated Gradient (EG) / Hedge algorithm with risk and drawdown constraints:
+
+Update weights every N minutes or after M trades:
+
+reward = edge_net - λ_risk*risk - λ_tail*tail_loss - λ_exec*exec_drag
+
+w_i ← w_i * exp(η * reward_i)
+
+normalize weights; apply floor/ceiling; apply regime gating
+
+This is simple, extremely effective, and well-studied for “expert aggregation.”
+
+3.3 Risk-Constrained Capital Allocation
+
+After weights:
+
+apply volatility targeting at portfolio level
+
+enforce exposure caps per venue/asset
+
+apply drawdown-based risk-off:
+
+if portfolio DD > X: reduce global risk multiplier
+
+if expert DD > Y: quarantine expert (cooldown + revalidation)
+
+This is your “self-correcting immune system.”
+
+4) Using Prometheus/Grafana Feedback Correctly
+
+You must not use Grafana/Prometheus to “predict price.” You use them to manage system health and execution quality, which materially affects Sharpe.
+
+Feed these metrics into an Execution Quality Model:
+
+Inputs (from Prometheus)
+
+order_ack_latency_p99
+
+ws_disconnects, gap_events
+
+fill_ratio, cancel_ratio
+
+slippage_bps by venue/symbol
+
+reject_rate, post_only_rejects
+
+queue_time_ms, time_to_fill_ms
+
+adverse_selection_proxy (PnL immediately after fill)
+
+Outputs
+
+aggressiveness score per venue/symbol (maker vs taker tilt)
+
+max order rate throttles
+
+quote width multipliers (market making / limit placing)
+
+auto-disable rules when execution becomes toxic
+
+This is how a professional platform prevents “strategy alpha” from being destroyed by degraded execution.
+
+5) End-to-End Trading Loop (QuantKubera-native)
+
+Because QuantKubera is event-driven with WAL + sandboxing, HYDRA runs as:
+
+Data events (Tick/Bar) → feature updates
+
+Regime update (scheduled + event-triggered on change points)
+
+Experts propose intents (tagged orders with rationale + expected edge)
+
+Pre-trade risk rejects/adjusts
+
+Meta-allocator sets per-expert risk budgets and final order sizes
+
+Execution router chooses venue + order type based on execution quality
+
+Fills update attribution ledger
+
+Online learning updates weights
+
+WAL logs everything (replayable determinism)
+
+MLflow logs experiments (parameters, metrics, regime stats)
+
+6) Concrete “World-Class” Features You Should Ship With HYDRA
+
+These are differentiators that exploit your platform:
+
+6.1 Attribution Ledger (Mandatory)
+
+Every fill is tagged:
+
+expert id
+
+regime id
+
+signal family
+
+order style (maker/taker)
+
+expected edge at placement time
+
+realized edge net
+
+This is how the system learns which alpha is real.
+
+6.2 Quarantine + Revalidation
+
+When an expert underperforms:
+
+quarantine it automatically
+
+run a quick WAL replay on the recent window with slight parameter perturbations
+
+if it recovers under realistic costs: re-enable with reduced risk
+
+else: keep disabled and log the failure
+
+6.3 Walk-Forward as a First-Class Citizen
+
+Your backtest suite should run:
+
+rolling train/validate windows
+
+multiple cost assumptions
+
+stress scenarios (spread widening, latency injection)
+Only strategies that survive get capital.
+
+6.4 Kill-Switch Policy (Non-negotiable)
+
+Trigger kill switches on:
+
+abnormal latency p99
+
+repeated disconnects / data gaps
+
+slippage explosion vs baseline
+
+drawdown breach
+
+risk limit breaches
+This is how you keep the platform alive long enough to evolve.
+
+7) Minimal Build Spec (What to implement first)
+
+If you want HYDRA to be real quickly, build in this order:
+
+Expert A + Expert B (trend + mean reversion)
+
+Regime engine with 4 regimes: trend/range/high-vol/illiquid
+
+Attribution ledger (expert-level PnL net of costs)
+
+Meta-allocator (EG/Hedge) + drawdown quarantine
+
+Execution quality model driven by Prometheus metrics
+
+Add Expert D (microstructure) only after costs are modeled well
+
+Add FnO (Expert C) after margin/risk is proven
+
+This prevents the common failure mode: too many knobs, no truth.
+
+8) Reality Check on Sharpe > 10
+
+If you are serious about chasing very high Sharpe:
+
+it usually requires capacity-limited edges
+
+extremely tight execution and cost control
+
+narrow product selection and time windows
+
+disciplined kill-switching and avoidance of “bad states”
+
+HYDRA is designed to identify and concentrate on those conditions if they exist, and to back off when they do not.
+
+If you want the next step
+
+Paste (or upload) your QuantKubera repo structure or the key interfaces for:
+
+canonical event schemas
+
+strategy SDK hooks
+
+risk API
+
+execution router API
+
+And I will produce a drop-in design for kubera-strategy-host implementing:
+
+HydraCoordinator
+
+RegimeEngine
+
+Expert modules
+
+AttributionLedger
+
+MetaAllocatorEG
+
+ExecutionQualityGate
+

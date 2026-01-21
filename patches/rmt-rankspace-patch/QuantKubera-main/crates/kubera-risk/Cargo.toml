@@ -1,0 +1,21 @@
+[package]
+name = "kubera-risk"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-models = { path = "../kubera-models" }
+serde = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+metrics = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+chrono = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "bench_risk"
+harness = false

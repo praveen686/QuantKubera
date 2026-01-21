@@ -1,0 +1,63 @@
+[package]
+name = "kubera-backtest"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "gen_wal"
+path = "src/bin/gen_wal.rs"
+
+[[bin]]
+name = "kubera-backtest"
+path = "src/main.rs"
+
+[[bin]]
+name = "optimize_hydra"
+path = "src/bin/optimize_hydra.rs"
+
+[[bin]]
+name = "optimize_aeon"
+path = "src/bin/optimize_aeon.rs"
+
+[[bin]]
+name = "fetch_binance_history"
+path = "src/bin/fetch_binance_history.rs"
+
+[[bin]]
+name = "backtest_aeon_export"
+path = "src/bin/backtest_aeon_export.rs"
+
+[[bin]]
+name = "record_zerodha_wal_l2"
+path = "src/bin/record_zerodha_wal_l2.rs"
+
+[dependencies]
+kubera-core = { path = "../kubera-core" }
+kubera-models = { path = "../kubera-models" }
+kubera-executor = { path = "../kubera-executor" }
+kubera-data = { path = "../kubera-data" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+kubera-mlflow = { path = "../kubera-mlflow" }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+rand = "0.8"
+rand_pcg = "0.3"
+rand_distr = "0.4"
+reqwest = { version = "0.11", features = ["json"] }
+arrow = { workspace = true }
+parquet = { workspace = true }
+
+[features]
+cpp_exec = ["kubera-executor/cpp_exec"]
+
+[dev-dependencies]
+kubera-ffi = { path = "../kubera-ffi" }

@@ -1,0 +1,23 @@
+[package]
+name = "kubera-executor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-models = { path = "../kubera-models" }
+kubera-core = { path = "../kubera-core" }
+tokio = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+rand_pcg = "0.3"
+serde = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "benchmark_executor"
+harness = false

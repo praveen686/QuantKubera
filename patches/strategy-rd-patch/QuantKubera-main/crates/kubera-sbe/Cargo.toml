@@ -1,0 +1,21 @@
+[package]
+name = "kubera-sbe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+byteorder = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+kubera-models = { path = "../kubera-models" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "decode_bench"
+harness = false
+

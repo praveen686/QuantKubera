@@ -1,0 +1,23 @@
+[mode]
+execution = "paper"
+# ATM NIFTY options (25400 and 25450 strikes, today's expiry)
+symbols = ["NIFTY2612025400CE", "NIFTY2612025400PE", "NIFTY2612025450CE", "NIFTY2612025450PE"]
+
+[risk]
+max_order_value_usd = 100000.0
+max_notional_per_symbol_usd = 200000.0
+
+[execution]
+simulated = true
+slippage_bps = 2.0
+commission_model = "ZerodhaFnO"
+
+[strategy.hydra]
+venue = "ZerodhaFnO"
+learning_rate = 0.05
+zscore_action_threshold = 1.5
+position_hysteresis = 0.15
+lambda_risk = 0.6
+edge_hurdle_multiplier = 0.7
+slippage_bps = 2.0
+commission_bps = 4.0

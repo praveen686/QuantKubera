@@ -1,0 +1,28 @@
+[package]
+name = "kubera-connectors"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kubera-core = { path = "../kubera-core" }
+kubera-models = { path = "../kubera-models" }
+kubera-sbe = { path = "../kubera-sbe" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+metrics = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+dotenv = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+reqwest = { workspace = true }
+byteorder = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+futures-util = "0.3"
+

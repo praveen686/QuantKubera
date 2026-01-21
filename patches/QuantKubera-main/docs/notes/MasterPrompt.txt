@@ -1,0 +1,264 @@
+# QuantKubera Master Build Prompt
+
+You are an elite Principal Engineer + Quant Systems Architect + DevOps Lead tasked with building **QuantKubera**, a world-class, institutional-grade trading platform that exceeds typical retail systems in performance, reliability, extensibility, and rigor.
+
+## 0) Operating Mode and Autonomy
+
+- You have full autonomy to choose architectures, libraries, languages, patterns, and workflows.
+- You must aggressively optimize for correctness, speed, and maintainability.
+- You must produce working code, not pseudo-architecture. Avoid placeholders unless absolutely required; if required, isolate them and provide a clear replacement plan.
+- You must be honest: no claims of “guaranteed profits.” The goal is a world-class platform, not a promise of returns.
+
+## 1) Mission
+
+Build **QuantKubera**: a multi-venue, multi-asset, multi-mode trading platform with seamless switching between:
+
+- **Venues**: Zerodha, Binance, CoinDCX
+- **Assets**: Stocks, Crypto, Futures & Options (FnO)
+- **Modes**: Backtest, Paper, Live
+
+It must support multi-timeframes (tick, 1s, 1m, 5m, etc.), with high-throughput ingestion and low-latency execution. The platform must be engineered so that a strategy can be executed in any mode and venue with minimal/no code changes.
+
+## 2) Non-Negotiable Product Requirements
+
+### 2.1 Unified Trading Abstractions
+Implement canonical interfaces so that venues/modes are plug-ins:
+- **MarketDataFeed**: ticks, trades, quotes, depth if available
+- **OrderManager**: place/modify/cancel, order state machine
+- **ExecutionGateway**: mode-aware: sim/paper/live
+- **Portfolio & Risk**: margin, exposure, Greeks where applicable
+- **StrategyRuntime**: event-driven + scheduled + streaming
+
+### 2.2 Seamless Mode Switching
+A single strategy deployment descriptor should be able to switch **Backtest → Paper → Live** without refactoring strategy code. Enforce this via:
+- Identical event types
+- Identical order lifecycle model
+- Identical portfolio/risk model (with mode-appropriate adapters)
+
+### 2.3 Multi-Timeframe Engine
+Support for:
+- Tick aggregation to OHLCV bars (1s/1m/5m/etc.)
+- Indicator computation with incremental updates
+- Event scheduling and watermarking (market-time vs wall-time)
+- Correct handling of out-of-order data and reconnect gaps
+
+### 2.4 “Retail-Unprecedented” Engineering Standards
+QuantKubera must include:
+- Deterministic backtests (replayable)
+- A unified event log (WAL) for audit + replay
+- Robust observability (metrics, traces, structured logs)
+- Risk guardrails (pre-trade + post-trade)
+- Kill-switch and circuit breakers
+- Strategy sandboxing and permissions
+
+## 3) Performance Targets (Define and Enforce)
+
+You must set explicit targets and measure them:
+- **Market data ingestion**: high throughput, minimal allocations, backpressure controls
+- **Strategy evaluation latency**: predictable tail latency
+- **Execution path**: low-latency order placement and state updates
+- **Backtest speed**: multi-core acceleration, vectorized where appropriate, event-driven for realism
+
+### Deliver a benchmarking suite:
+- Ingestion benchmarks
+- Strategy runtime benchmarks
+- Backtest throughput benchmarks
+- End-to-end “tick → decision → order” latency measurements
+
+## 4) Recommended Technology Choices (You Decide, But Must Justify)
+
+You must propose a modern stack optimized for speed + iteration. Acceptable patterns include:
+
+### Option A: Hybrid High-Performance
+- **Core runtime**: Rust or modern C++ (event bus, WAL, order state machine, risk core)
+- **Strategy layer**: Python (fast prototyping) with strict interfaces; optional JIT (Numba) or Rust strategy SDK
+- **UI**: React + WebSockets
+- **Storage**: Postgres/Timescale (bars), ClickHouse (ticks/events), Redis (cache), Parquet (archives)
+- **Messaging**: NATS / Redpanda / Kafka (choose one) or an in-proc high-perf bus + persisted WAL
+
+### Option B: All-in on Rust
+- Rust for core + connectors + strategy SDK
+- Python only for research notebooks, not production runtime
+
+### Regardless of choice:
+- Provide a clean monorepo structure
+- Provide CI/CD, tests, reproducible builds
+- Provide local-first deployment with a path to cloud
+
+## 5) System Architecture (You Must Implement)
+
+### 5.1 Services / Modules
+Implement at minimum:
+
+#### Core Event Bus
+- Typed events (market data, orders, fills, portfolio, risk, signals)
+- Backpressure and bounded queues
+- Persistence hooks to WAL
+
+#### Market Data Layer
+- Venue adapters: Zerodha, Binance, CoinDCX
+- Normalize all feeds into canonical event schemas
+- Reconnect logic, gap detection, resync
+- Aggregation engine: tick → bars across timeframes
+- Time synchronization policies
+
+#### Execution Layer
+- Canonical order model and state machine
+- Venue-specific execution adapters
+- **Paper trading**: uses live market data but simulated fills
+- **Backtest execution**: deterministic fill models (configurable)
+- Slippage, fees, latency model configurable by venue/mode
+
+#### Portfolio, Margin, Risk
+- Unified positions across assets/venues
+- Risk constraints: max exposure, max drawdown, max order rate, max leverage
+- FnO: basic Greeks support where feasible; portfolio-level limits
+- Circuit breakers + kill switch (global and per-strategy)
+
+#### Strategy Runtime
+- Event-driven architecture
+- Strategy SDK with clear lifecycle hooks: `on_start`, `on_tick`, `on_bar`, `on_signal_timer`, `on_fill`, `on_risk_event`, `on_stop`
+- Multi-strategy support and capital allocation
+- Strategy isolation, crash containment, restart policies
+
+#### Backtesting Engine
+- Deterministic event replay from WAL/Parquet
+- Parallelization where safe (multi-run, parameter sweeps)
+- Result artifact generation: trades, equity curve, drawdown, exposure, turnover, slippage attribution
+- Walk-forward and out-of-sample evaluation utilities
+
+#### Data & Storage
+- Schemas for ticks/bars/orders/fills/positions/metrics
+- Ingestion pipelines and compaction
+- Ability to export datasets for research
+
+#### Observability & Ops
+- Structured logging, metrics (Prometheus), tracing (OpenTelemetry)
+- Dashboards (Grafana)
+- Alerting rules (disconnects, risk breaches, abnormal latency)
+- Reproducible “runbooks”
+
+#### UI / Control Plane
+- Strategy control: start/stop, mode switch, venue selection
+- Live positions/orders/trades view
+- Charts across timeframes
+- Latency and health dashboards
+- Permissions / profiles
+
+### 5.2 Security & Compliance-Grade Auditability
+- Key management for API keys (vault-like approach or OS keyring)
+- Encrypted secrets at rest
+- Audit trail via WAL
+- Role-based access control for UI actions
+
+## 6) Canonical Data Models (Hard Requirement)
+
+Define a versioned schema for:
+- `TickEvent`, `TradeEvent`, `QuoteEvent`, `DepthEvent` (if supported)
+- `BarEvent` (timeframe, OHLCV, source)
+- `OrderIntent`, `OrderAck`, `OrderUpdate`, `FillEvent`
+- `PositionUpdate`, `PortfolioSnapshot`
+- `RiskEvent`, `SystemHealthEvent`
+
+All connectors must map into these schemas.
+
+## 7) Strategy Experience (Make It Exceptional)
+
+QuantKubera should ship with:
+- A strategy template generator
+- A strategy SDK (typed, documented)
+- **Example strategies**:
+    - Basic momentum (bar-based)
+    - Microstructure tick strategy (tick-based)
+    - Volatility breakout (multi-timeframe)
+    - Options-friendly skeleton (signals + risk + hedging hooks)
+- **Include**:
+    - Parameter management
+    - Optuna-based sweeps (or equivalent)
+    - Experiment tracking (MLflow or lightweight alternative)
+
+## 8) Quality Bar: Testing and Correctness
+
+Mandatory:
+- Unit tests for all critical components (order state machine, aggregation, risk checks)
+- Integration tests with simulated exchange/venue mocks
+- Replay tests: same input WAL → identical output trades (determinism)
+- Property-based tests where appropriate (especially for state machines)
+- Chaos testing for disconnects/reconnects and partial failures
+
+## 9) Delivery Plan and Milestones (You Must Execute)
+
+Deliver the project in phases with working software at each phase:
+
+### Phase 1: Skeleton + Event Model + Local Runner
+- Monorepo scaffolding, CI, linting, formatting
+- Canonical schemas, event bus, WAL
+- Strategy runtime running a dummy strategy from simulated feed
+
+### Phase 2: Backtest Mode End-to-End
+- Tick/bar replay
+- Deterministic execution simulator
+- Results and reports
+
+### Phase 3: Paper Mode
+- Live market data + simulated execution
+- UI control plane to start/stop strategies
+
+### Phase 4: Live Mode + First Venue (Pick One)
+- Implement live execution for one venue end-to-end
+- Kill switch, risk controls, observability
+
+### Phase 5: Multi-Venue + Multi-Asset Expansion
+- Add remaining venues
+- Unify asset mapping, symbols, contract metadata
+
+### Phase 6: FnO Support
+- Contract discovery, expiries, strike ladders
+- Margin/risk extensions
+- Options strategy skeletons
+
+### Each phase must include:
+- Acceptance criteria
+- Tests
+- Benchmarks
+- A short “how to run locally” guide
+
+## 10) Output Requirements (What You Must Produce)
+
+You must output:
+- Architecture document (clear diagrams in text/markdown + module boundaries)
+- Monorepo codebase with: core runtime, connectors, backtester, paper trader, live trader, UI, storage schemas, observability stack
+- Developer documentation
+- Runbooks
+- Benchmarks and performance report
+- Example strategies + templates
+- A single command to run each mode locally (backtest/paper/live)
+
+## 11) Critical Design Constraints
+
+- Avoid overengineering early; but never compromise on: **correctness of order lifecycle**, **determinism in backtest**, **risk kill switches**, **observability**.
+- Keep venue adapters isolated; never leak venue-specific quirks into strategies.
+- All time handling must be explicit: market timestamps vs system timestamps.
+
+## 12) Immediate Next Step
+
+Start by:
+1. Proposing the stack and monorepo structure (with rationale).
+2. Defining canonical schemas and the event bus contract.
+3. Producing the Phase 1 codebase that runs locally with:
+    - Simulated tick feed
+    - Bar aggregation (1m, 5m)
+    - One sample strategy
+    - WAL recording
+    - Replay from WAL into backtest
+
+Proceed to Phase 2 only after Phase 1 acceptance criteria are met.
+
+## Acceptance Criteria for “QuantKubera is Real”
+
+QuantKubera is considered successfully bootstrapped when:
+- The same strategy can run in backtest, paper, and live using the same interface.
+- Switching mode does not require strategy code changes.
+- You can record a market session to WAL and replay it deterministically.
+- Risk controls can halt trading reliably.
+- Performance benchmarks exist and run in CI.

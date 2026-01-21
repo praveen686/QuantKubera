@@ -1,0 +1,38 @@
+groups:
+  - name: QuantKuberaAlerts
+    rules:
+      - alert: IngestionLatencyHigh
+        expr: kubera_ingestion_latency_ms{quantile="0.9"} > 500
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High ingestion latency for {{ $labels.symbol }}"
+          description: "Ingestion latency for {{ $labels.symbol }} exceeded 500ms for 1 minute."
+
+      - alert: StrategyDecisionLatencyHigh
+        expr: kubera_strategy_decision_latency_ms{quantile="0.9"} > 50
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High strategy decision latency for {{ $labels.symbol }}"
+          description: "Strategy {{ $labels.hook }} for {{ $labels.symbol }} exceeded 50ms decision time."
+
+      - alert: EventBusHighQueueDepth
+        expr: kubera_bus_orders_queue_depth > 800 or kubera_bus_signals_queue_depth > 800
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Event Bus queue depth reaching capacity"
+          description: "One of the Event Bus queues is over 80% full (1000 capacity)."
+
+      - alert: ConnectorDisconnect
+        expr: delta(kubera_ingestion_messages_total[1m]) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connector disconnected for {{ $labels.symbol }}"
+          description: "No messages received for {{ $labels.symbol }} in the last 1 minute."

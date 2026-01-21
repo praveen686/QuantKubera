@@ -418,6 +418,12 @@ impl<'a> MultiLegCoordinator<'a> {
         order: &MultiLegOrder,
         feed: &mut crate::replay::ReplayFeed,
     ) -> MultiLegResult {
+        // Prime simulator time from first replay event to ensure order eligibility
+        // aligns with event timestamps (critical for offline replay).
+        if let Some(ev) = feed.peek() {
+            self.sim.now = ev.ts();
+        }
+
         let start = self.sim.now();
         let deadline = start + self.policy.timeout;
 
