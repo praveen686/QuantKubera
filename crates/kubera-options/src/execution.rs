@@ -150,6 +150,112 @@ impl MultiLegExecutor {
         self
     }
 
+    // ======= Live fill confirmation (production safety) =======
+    // We do NOT assume fills in live mode. We poll the broker until the order
+    // reaches a terminal state, then record the actual avg fill price.
+    const KITE_BASE_URL: &'static str = "https://api.kite.trade";
+    const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
+    const DEFAULT_POLL_TIMEOUT_MS: u64 = 15_000;
+
+    async fn fetch_order_history(&self, order_id: &str) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}/orders/{}", Self::KITE_BASE_URL, order_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("X-Kite-Version", "3")
+            .header(
+                "Authorization",
+                format!("token {}:{}", self.api_key, self.access_token),
+            )
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!("[LIVE FILL] Kite order history failed: status={} body={}", status, body);
+        }
+
+        Ok(serde_json::from_str::<serde_json::Value>(&body)?)
+    }
+
+    /// Poll Kite until the order is COMPLETE / REJECTED / CANCELLED.
+    /// Returns (status, avg_price, filled_qty).
+    async fn poll_fill_confirmation(
+        &self,
+        order_id: &str,
+        expected_qty: u32,
+        timeout_ms: u64,
+        interval_ms: u64,
+    ) -> anyhow::Result<(LegStatus, Option<f64>, u32)> {
+        use tokio::time::{sleep, Duration, Instant};
+        use tracing::debug;
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1));
+        debug!("[LIVE FILL CONFIRMATION] Polling order {} (timeout={}ms)", order_id, timeout_ms);
+
+        loop {
+            let v = self.fetch_order_history(order_id).await?;
+
+            // Kite typically returns: { "status":"success", "data":[ ...order history... ] }
+            let data = v.get("data").cloned().unwrap_or(serde_json::Value::Null);
+
+            let last = match data {
+                serde_json::Value::Array(arr) if !arr.is_empty() => arr[arr.len() - 1].clone(),
+                serde_json::Value::Object(_) => data,
+                _ => serde_json::Value::Null,
+            };
+
+            let status_str = last.get("status").and_then(|x| x.as_str()).unwrap_or("");
+            let filled_qty = last
+                .get("filled_quantity")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32;
+
+            let avg_price = last
+                .get("average_price")
+                .and_then(|x| x.as_f64())
+                .or_else(|| {
+                    last.get("average_price")
+                        .and_then(|x| x.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                });
+
+            let terminal = status_str.eq_ignore_ascii_case("COMPLETE")
+                || status_str.eq_ignore_ascii_case("REJECTED")
+                || status_str.eq_ignore_ascii_case("CANCELLED")
+                || status_str.eq_ignore_ascii_case("CANCELED");
+
+            if terminal {
+                let st = if status_str.eq_ignore_ascii_case("COMPLETE") {
+                    if filled_qty >= expected_qty {
+                        LegStatus::Filled
+                    } else {
+                        LegStatus::PartiallyFilled
+                    }
+                } else if status_str.eq_ignore_ascii_case("REJECTED") {
+                    LegStatus::Rejected
+                } else {
+                    LegStatus::Cancelled
+                };
+
+                debug!("[LIVE FILL CONFIRMATION] Order {} terminal: {:?} avg_price={:?} filled={}",
+                       order_id, st, avg_price, filled_qty);
+                return Ok((st, avg_price, filled_qty));
+            }
+
+            if Instant::now() >= deadline {
+                debug!("[LIVE FILL CONFIRMATION] Order {} timeout (not terminal)", order_id);
+                // Not terminal: fail-safe; caller decides whether to cancel or abort.
+                return Ok((LegStatus::Placed, avg_price, filled_qty));
+            }
+
+            sleep(Duration::from_millis(interval_ms.max(50))).await;
+        }
+    }
+
     /// Synchronizes the execution of all strategy components.
     ///
     /// # Rollback Logic
@@ -187,14 +293,54 @@ impl MultiLegExecutor {
 
             match self.place_leg(leg).await {
                 Ok(order_id) => {
-                    info!(order_id = %order_id, "Leg placed successfully");
+                    info!(order_id = %order_id, "Leg placed, polling for fill confirmation...");
+
+                    // ======= LIVE FILL CONFIRMATION =======
+                    // Do not assume fill. Poll broker until terminal status.
+                    let (final_status, final_fill_price, filled_qty) = match self.poll_fill_confirmation(
+                        &order_id,
+                        leg.quantity,
+                        Self::DEFAULT_POLL_TIMEOUT_MS,
+                        Self::DEFAULT_POLL_INTERVAL_MS,
+                    ).await {
+                        Ok((st, avg_price, qty)) => (st, avg_price, qty),
+                        Err(e) => {
+                            warn!(order_id = %order_id, error = %e, "Fill confirmation failed");
+                            (LegStatus::Placed, None, 0)
+                        }
+                    };
+
+                    let final_error = if !matches!(final_status, LegStatus::Filled) {
+                        Some(format!("Order not fully filled: status={:?} filled_qty={} expected_qty={}",
+                                     final_status, filled_qty, leg.quantity))
+                    } else {
+                        None
+                    };
+
+                    if final_error.is_some() {
+                        all_success = false;
+                        warn!(order_id = %order_id, "Leg not fully filled; cancelling and rolling back");
+                        // Best-effort cancel this order
+                        let _ = self.cancel_order(&order_id).await;
+                        // Rollback previous successful legs
+                        for prev in &leg_results {
+                            if let Some(prev_id) = &prev.order_id {
+                                let _ = self.cancel_order(prev_id).await;
+                            }
+                        }
+                    }
+
                     leg_results.push(LegExecutionResult {
                         tradingsymbol: leg.tradingsymbol.clone(),
                         order_id: Some(order_id),
-                        status: LegStatus::Placed,
-                        fill_price: None,
-                        error: None,
+                        status: final_status,
+                        fill_price: final_fill_price,
+                        error: final_error,
                     });
+
+                    if !all_success {
+                        break;
+                    }
                 }
                 Err(e) => {
                     error!(error = %e, leg = i + 1, "Leg execution failed");

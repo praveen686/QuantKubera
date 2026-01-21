@@ -46,7 +46,8 @@ use kubera_options::{OptionGreeks, OptionType};
 use crate::EventBus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, error, debug, trace};
+use crate::rmt;
 use std::collections::{HashMap, VecDeque};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -161,6 +162,18 @@ pub struct HydraConfig {
     pub coherence_min: f64,
     /// Multiplier for heuristic edge estimates (for calibration experiments)
     pub edge_scale_mult: f64,
+    /// Rank-space MR rolling window (ticks)
+    pub rankspace_window: usize,
+    /// Rank-space MR edge scale at |signal|=1.0 (bps)
+    pub rankspace_edge_scale_bps: f64,
+    /// Enable RMT-based correlation awareness in the meta allocator
+    pub rmt_enabled: bool,
+    /// RMT rolling window length (returns samples)
+    pub rmt_window: usize,
+    /// Minimum acceptable effective-rank fraction vs number of experts
+    pub rmt_min_effective_rank_frac: f64,
+    /// Maximum shrinkage toward uniform weights
+    pub rmt_shrink_max_alpha: f64,
 }
 
 impl Default for HydraConfig {
@@ -202,7 +215,14 @@ impl Default for HydraConfig {
             autocorrelation_range_threshold: -0.1,
             edge_hurdle_multiplier: 2.5, // Default to strict Masterpiece filter
             coherence_min: 0.65, // Require broad expert alignment
-            edge_scale_mult: 1.0, // No edge scaling by default
+            edge_scale_mult: 1.0,
+            rankspace_window: 240,
+            rankspace_edge_scale_bps: 18.0,
+            // RMT correlation awareness (disabled by default)
+            rmt_enabled: false,
+            rmt_window: 100,
+            rmt_min_effective_rank_frac: 0.65,
+            rmt_shrink_max_alpha: 0.5,
         }
     }
 }
@@ -1994,6 +2014,116 @@ impl Expert for RelativeValueExpert {
     }
 }
 
+// =============================================================================
+// Expert-F: Rank-Space Mean Reversion (R&D)
+// - If only one symbol is running, falls back to time-series rank within a rolling window.
+// - If multiple symbols are enabled in a future multi-symbol runner, the same score can be
+//   upgraded to cross-sectional ranks.
+// =============================================================================
+
+pub struct RankSpaceMeanRevExpert {
+    /// Rolling window of mid prices (time-series rank fallback)
+    mid_window: std::collections::VecDeque<f64>,
+    /// Most recent signal in [-1, 1]
+    signal: f64,
+    /// Rolling window size
+    window: usize,
+    /// Edge scale (bps at |signal|=1.0)
+    edge_scale_bps: f64,
+}
+
+impl RankSpaceMeanRevExpert {
+    pub fn new(window: usize, edge_scale_bps: f64) -> Self {
+        Self {
+            mid_window: std::collections::VecDeque::with_capacity(window.max(16)),
+            signal: 0.0,
+            window: window.max(16),
+            edge_scale_bps: edge_scale_bps.max(1.0),
+        }
+    }
+
+    fn percentile_rank(window: &std::collections::VecDeque<f64>, x: f64) -> f64 {
+        // Simple empirical CDF rank. O(N) but N is small (rolling window).
+        if window.is_empty() {
+            return 0.5;
+        }
+        let mut le = 0usize;
+        for v in window.iter() {
+            if *v <= x {
+                le += 1;
+            }
+        }
+        le as f64 / (window.len() as f64)
+    }
+}
+
+impl Expert for RankSpaceMeanRevExpert {
+    fn name(&self) -> &'static str {
+        "Expert-F-RankSpaceMR"
+    }
+
+    fn signal_family(&self) -> &str { "rank-mean-reversion" }
+
+    fn update_market(&mut self, event: &MarketEvent) {
+        // Get price from market event
+        let mid = match &event.payload {
+            MarketPayload::Tick { price, .. } => *price,
+            MarketPayload::Trade { price, .. } => *price,
+            _ => return,
+        };
+
+        if mid.is_finite() && mid > 0.0 {
+            self.mid_window.push_back(mid);
+            if self.mid_window.len() > self.window {
+                self.mid_window.pop_front();
+            }
+        }
+
+        if self.mid_window.len() >= 8 {
+            let rank = Self::percentile_rank(&self.mid_window, mid);
+            // Mean reversion: high rank => short, low rank => long.
+            let raw = -(rank - 0.5) * 2.0;
+            // Soft clip with tanh to avoid hard saturation.
+            self.signal = raw.tanh();
+        } else {
+            self.signal = 0.0;
+        }
+    }
+
+    fn generate_intent(&self, regime: &RegimeState) -> Option<ExpertIntent> {
+        if self.signal.abs() < 0.05 {
+            return None;
+        }
+
+        let expected_edge_bps = self.edge_scale_bps * self.signal.abs();
+
+        Some(ExpertIntent {
+            intent_id: Uuid::new_v4(),
+            expert_id: self.name().to_string(),
+            signal: self.signal,
+            expected_edge_bps,
+            confidence: regime.confidence * self.signal.abs().clamp(0.0, 1.0),
+            timestamp: Utc::now(),
+            regime: regime.regime,
+            signal_family: self.signal_family().to_string(),
+            order_style: OrderStyle::Taker, // Mean-reversion uses taker for quick entry
+            stop_loss: None,
+            take_profit: None,
+            time_exit_ticks: Some(300), // Time-based exit after 300 ticks
+        })
+    }
+
+    fn expected_edge(&self) -> f64 {
+        self.edge_scale_bps * self.signal.abs()
+    }
+
+    fn get_signal(&self) -> f64 {
+        self.signal
+    }
+}
+
+
+
 // ============================================================================
 // ATTRIBUTION LEDGER - THE TRUTH KEEPER
 // ============================================================================
@@ -2367,7 +2497,76 @@ impl MetaAllocator {
             }
         }
 
-        // Update portfolio-level drawdown
+        
+        // RMT correlation awareness (optional): if experts are highly correlated, shrink weights toward uniform.
+        if self.config.rmt_enabled {
+            // Build aligned return series for non-quarantined experts.
+            let mut names: Vec<String> = Vec::new();
+            let mut series: Vec<Vec<f64>> = Vec::new();
+
+            for (name, st) in self.states.iter() {
+                if st.quarantined {
+                    continue;
+                }
+                // Take the most recent window (aligned by truncation).
+                let mut v: Vec<f64> = st
+                    .returns
+                    .iter()
+                    .rev()
+                    .take(self.config.rmt_window)
+                    .cloned()
+                    .collect();
+                v.reverse();
+                if v.len() >= 3 {
+                    names.push(name.clone());
+                    series.push(v);
+                }
+            }
+
+            // Align lengths (truncate to min length).
+            if series.len() >= 2 {
+                let min_len = series.iter().map(|v| v.len()).min().unwrap_or(0);
+                if min_len >= 3 {
+                    for v in series.iter_mut() {
+                        v.truncate(min_len);
+                    }
+
+                    if let Some(summary) = rmt::summarize_rmt(&series) {
+                        let current: Vec<f64> = names
+                            .iter()
+                            .map(|n| self.states.get(n).map(|s| s.weight).unwrap_or(0.0))
+                            .collect();
+
+                        let (shrunk, alpha) = rmt::shrink_weights_toward_uniform(
+                            &current,
+                            summary.effective_rank,
+                            self.config.rmt_min_effective_rank_frac,
+                            self.config.rmt_shrink_max_alpha,
+                        );
+
+                        if alpha > 0.0 {
+                            for (i, n) in names.iter().enumerate() {
+                                if let Some(st) = self.states.get_mut(n) {
+                                    st.weight = shrunk[i];
+                                }
+                            }
+
+                            trace!(
+                                "[RMT] n={} t={} q={:.2} eff_rank={:.2} mp_max={:.2} shrink_alpha={:.2}",
+                                summary.n,
+                                summary.t,
+                                summary.q,
+                                summary.effective_rank,
+                                summary.lambda_max_mp,
+                                alpha
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+// Update portfolio-level drawdown
         let total_pnl: f64 = expert_pnls.values().sum();
         self.portfolio_pnl = total_pnl;
         if total_pnl > self.portfolio_peak {
@@ -3096,6 +3295,7 @@ impl HydraStrategy {
             Box::new(VolatilityExpert::new()),
             Box::new(MicrostructureExpert::new()),
             Box::new(RelativeValueExpert::new()),
+            Box::new(RankSpaceMeanRevExpert::new(config.rankspace_window, config.rankspace_edge_scale_bps)),
         ];
 
         let names: Vec<String> = experts.iter().map(|e| e.name().to_string()).collect();

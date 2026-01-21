@@ -47,6 +47,7 @@ pub mod connector;
 pub mod observability;
 pub mod oras;
 pub mod hydra;
+pub mod rmt;
 pub mod metrics;
 pub mod aeon;
 pub mod parquet_export;
