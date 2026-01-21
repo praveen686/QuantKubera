@@ -16,6 +16,7 @@
 
 use crate::execution::{LegOrder, LegOrderType, LegSide, LegStatus, MultiLegOrder, MultiLegResult, LegExecutionResult};
 use crate::replay::{QuoteEvent, ReplayEvent};
+use crate::specs::SpecStore;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +31,11 @@ pub struct KiteSimConfig {
     /// If set, adds a pessimistic slippage in basis points to marketable fills.
     /// This is applied on top of bid/ask.
     pub taker_slippage_bps: f64,
+    /// Maximum adverse selection in basis points (Patch 2 hook).
+    /// Applied when mid moves against the order before fill.
+    pub adverse_selection_max_bps: f64,
+    /// Reject order if no quote received within this duration (Patch 2 hook).
+    pub reject_if_no_quote_after: Duration,
 }
 
 impl Default for KiteSimConfig {
@@ -38,8 +44,22 @@ impl Default for KiteSimConfig {
             latency: Duration::milliseconds(150),
             allow_partial: true,
             taker_slippage_bps: 0.0,
+            adverse_selection_max_bps: 0.0,
+            reject_if_no_quote_after: Duration::seconds(10),
         }
     }
+}
+
+/// Statistics collected during a KiteSim run (Patch 2).
+/// Wire these to BacktestReport for certification.
+#[derive(Debug, Default, Clone)]
+pub struct KiteSimRunStats {
+    /// Number of orders that timed out waiting for quotes.
+    pub timeouts: u64,
+    /// Number of multi-leg rollbacks triggered.
+    pub rollbacks: u64,
+    /// Slippage samples in basis points for analysis.
+    pub slippage_samples_bps: Vec<f64>,
 }
 
 /// Snapshot of last known quote.
@@ -77,16 +97,19 @@ impl SimOrder {
 /// Primary simulator: accepts quote events and matches eligible orders.
 pub struct KiteSim {
     cfg: KiteSimConfig,
+    specs: Option<SpecStore>,
     last_quotes: HashMap<String, Quote>,
     orders: HashMap<String, SimOrder>,
     next_id: AtomicU64,
-    now: DateTime<Utc>,
+    /// Current simulation time (public for Patch 2 stats wiring).
+    pub now: DateTime<Utc>,
 }
 
 impl KiteSim {
     pub fn new(cfg: KiteSimConfig) -> Self {
         Self {
             cfg,
+            specs: None,
             last_quotes: HashMap::new(),
             orders: HashMap::new(),
             next_id: AtomicU64::new(1),
@@ -94,8 +117,21 @@ impl KiteSim {
         }
     }
 
+    /// Attach instrument specs for lot size / tick size validation (Patch 2).
+    pub fn with_specs(mut self, specs: SpecStore) -> Self {
+        self.specs = Some(specs);
+        self
+    }
+
     pub fn now(&self) -> DateTime<Utc> {
         self.now
+    }
+
+    /// Patch 2 hook: attempt final reconciliation for timeout / race simulation.
+    /// Returns Some(result) if order was filled during the cancel window.
+    pub fn final_reconcile(&mut self, _order_id: &str) -> Option<LegExecutionResult> {
+        // Stub: Patch 3 will implement "filled while cancelling" behavior.
+        None
     }
 
     /// Advances simulator time and processes a single replay event.
@@ -423,6 +459,27 @@ impl<'a> MultiLegCoordinator<'a> {
             let _ = hedge_oid;
         }
     }
+
+    /// Execute with feed and collect stats (Patch 2 entrypoint).
+    /// Wire stats to BacktestReport for certification.
+    pub async fn execute_with_feed_and_stats(
+        &mut self,
+        order: &MultiLegOrder,
+        feed: &mut crate::replay::ReplayFeed,
+    ) -> (MultiLegResult, KiteSimRunStats) {
+        let mut stats = KiteSimRunStats::default();
+
+        let result = self.execute_with_feed(order, feed).await;
+
+        if !result.all_filled {
+            stats.rollbacks += 1;
+        }
+
+        // TODO (Patch 3): Populate slippage_samples_bps from fill prices vs mid
+        // TODO (Patch 3): Populate timeouts from reject_if_no_quote_after
+
+        (result, stats)
+    }
 }
 
 #[cfg(test)]
@@ -439,6 +496,8 @@ mod tests {
             latency: Duration::milliseconds(0),
             allow_partial: true,
             taker_slippage_bps: 0.0,
+            adverse_selection_max_bps: 0.0,
+            reject_if_no_quote_after: Duration::seconds(10),
         };
         let mut sim = KiteSim::new(cfg);
 
