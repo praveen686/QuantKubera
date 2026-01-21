@@ -792,24 +792,27 @@ async fn async_main() -> anyhow::Result<()> {
                     }
 
                     // Lot-size rounding is mandatory for NSE/BSE derivative-style symbols.
-                    // Must be explicitly configured in [execution.lot_sizes] for live/paper.
+                    // Auto-populate from get_nse_lot_size() if not explicitly configured.
                     if is_nse_like_symbol(&symbol_name) {
-                        let lot = runner_config
+                        let config_lot = runner_config
                             .execution
                             .lot_sizes
                             .as_ref()
-                            .and_then(|m| m.get(&symbol_name).copied());
-                        match lot {
-                            Some(v) if v > 0 => hydra.set_lot_size_for_symbol(&symbol_name, v),
-                            _ => {
-                                error!(
-                                    symbol = %symbol_name,
-                                    "Missing lot size in config [execution.lot_sizes] for NSE/BSE symbol; refusing to run."
-                                );
-                                error!("Add to config: [execution.lot_sizes]\n{}={}", symbol_name, get_nse_lot_size(&symbol_name));
-                                return;
+                            .and_then(|m| m.get(&symbol_name).copied())
+                            .filter(|&v| v > 0);
+
+                        let lot = match config_lot {
+                            Some(v) => {
+                                info!(symbol = %symbol_name, lot_size = v, "[LOT SIZE] Using configured lot size");
+                                v
                             }
-                        }
+                            None => {
+                                let auto_lot = get_nse_lot_size(&symbol_name);
+                                info!(symbol = %symbol_name, lot_size = auto_lot, "[LOT SIZE] Auto-detected lot size for NSE symbol");
+                                auto_lot
+                            }
+                        };
+                        hydra.set_lot_size_for_symbol(&symbol_name, lot);
                     }
 
                     Box::new(hydra)
