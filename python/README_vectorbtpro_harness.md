@@ -34,3 +34,31 @@ Example:
 Once a baseline is promising, wire HYDRA → orders, and validate on:
 
 - `kubera-runner backtest-kitesim --replay ... --orders ... --venue binance`
+
+## HYDRA-lite mode and orders.json
+
+
+By default the harness runs `--mode hydra`, which computes a **HYDRA-lite** expert ensemble
+from klines and backtests a **long-only** policy via VectorBT Pro.
+
+To emit a KiteSim-compatible `orders.json` (single-leg intent smoke test):
+
+```bash
+python3 python/vbt_hydra_klines_harness.py \
+  --symbol BTCUSDT \
+  --interval 1m \
+  --start 2026-01-20T00:00:00Z \
+  --end 2026-01-21T00:00:00Z \
+  --mode hydra \
+  --threshold 0.15 \
+  --emit-orders \
+  --orders-qty-base 0.001 \
+  --out artifacts/vbt_quicktest
+```
+
+This will write (if the final score exceeds the threshold):
+
+- `<out_dir>/orders.json` compatible with `kubera-runner backtest-kitesim`.
+
+**Important limitation:** The current runner executes orders sequentially without scheduling,
+so `orders.json` is intended for *smoke-grade intent validation*, not full intraday trade scheduling.

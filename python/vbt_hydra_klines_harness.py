@@ -41,6 +41,9 @@ import numpy as np
 import pandas as pd
 import requests
 
+# Silence pandas FutureWarning about fillna downcasting
+pd.set_option('future.no_silent_downcasting', True)
+
 # VectorBT Pro (paid package) import:
 import vectorbtpro as vbt
 
@@ -250,6 +253,254 @@ def _pf_stats(pf: "vbt.Portfolio") -> dict:
     return out
 
 
+# ----------------------------
+# HYDRA-lite expert ensemble
+# ----------------------------
+
+def rolling_percentile_rank(x: pd.Series, window: int) -> pd.Series:
+    """Percentile rank of the latest value within the rolling window (0..1)."""
+    def _pr(a: np.ndarray) -> float:
+        if a.size == 0:
+            return np.nan
+        last = a[-1]
+        return float(np.sum(a <= last)) / float(a.size)
+    return x.rolling(window, min_periods=window).apply(_pr, raw=True)
+
+
+def hydra_experts(ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute HYDRA-lite expert signals as continuous scores in [-1, +1].
+    These are intentionally simple and fast for klines-based screening.
+    """
+    close = ohlcv["close"]
+    ret = close.pct_change().fillna(0.0)
+    vol = realized_vol(ret, window=60)
+
+    # Expert-A (Trend): SMA crossover -> signed score
+    sma_fast = close.rolling(20).mean()
+    sma_slow = close.rolling(80).mean()
+    a = np.tanh(((sma_fast - sma_slow) / close).replace([np.inf, -np.inf], np.nan).fillna(0.0) * 50.0)
+
+    # Expert-B (MeanRev): zscore mean reversion
+    z = zscore(close, window=60).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    b = np.tanh(-z / 2.0)
+
+    # Expert-C (Volatility): high vol -> risk-off (negative), low vol -> risk-on (positive)
+    vol_q = vol.rolling(500).quantile(0.7).replace([np.inf, -np.inf], np.nan)
+    c_raw = (vol_q - vol).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    c = np.tanh(c_raw * 20.0)
+
+    # Expert-D (Microstructure proxy): volume+range expansion
+    rng = (ohlcv["high"] - ohlcv["low"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    vr = (rng / close).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    v = ohlcv["volume"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    v_z = zscore(v, window=120).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    d = np.tanh((v_z + (vr * 50.0)) / 3.0)
+
+    # Expert-E (RelValue proxy): deviation from rolling VWAP-like mean
+    vwap_like = (ohlcv["close"] * ohlcv["volume"]).rolling(120).sum() / (ohlcv["volume"].rolling(120).sum().replace(0.0, np.nan))
+    vwap_like = vwap_like.replace([np.inf, -np.inf], np.nan).bfill().fillna(close)
+    dev = ((close - vwap_like) / close).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    e = np.tanh(-dev * 80.0)
+
+    # Expert-F (RankSpaceMR): rolling percentile rank -> mean reversion
+    pr = rolling_percentile_rank(close, window=240).replace([np.inf, -np.inf], np.nan).fillna(0.5)
+    # High rank -> short, low rank -> long
+    f = np.tanh((0.5 - pr) * 6.0)
+
+    return pd.DataFrame({
+        "A_trend": a,
+        "B_meanrev": b,
+        "C_vol": c,
+        "D_micro": d,
+        "E_rel": e,
+        "F_rank_mr": f,
+    }, index=close.index)
+
+
+def hydra_ensemble_score(experts: pd.DataFrame, weights: Optional[np.ndarray] = None) -> pd.Series:
+    """
+    Weighted ensemble score in [-1, +1].
+    Default weights are equal.
+    """
+    X = experts.values
+    if weights is None:
+        w = np.ones(X.shape[1], dtype=float) / float(X.shape[1])
+    else:
+        w = np.asarray(weights, dtype=float)
+        w = w / (np.sum(np.abs(w)) + 1e-12)
+    s = X @ w
+    s = np.clip(s, -1.0, 1.0)
+    return pd.Series(s, index=experts.index, name="hydra_score")
+
+
+def score_to_signals(score: pd.Series, threshold: float) -> Tuple[pd.Series, pd.Series]:
+    """
+    Convert continuous score to entry/exit signals for VectorBT:
+    - Long when score > threshold
+    - Flat when score falls below 0
+    - (Optional) short can be added later; for now we keep long-only for safety.
+    """
+    long = score > threshold
+    exit_ = score < 0.0
+    long_prev = long.shift(1).fillna(False).astype(bool)
+    entries = long & (~long_prev)
+    exits = exit_ & long_prev
+    return entries, exits
+
+
+def fetch_binance_exchangeinfo_specs(symbol: str) -> Tuple[float, float]:
+    """
+    Fetch (tickSize, stepSize) for symbol from Binance exchangeInfo.
+    Returns (tick_size, step_size) as floats.
+    """
+    url = "https://api.binance.com/api/v3/exchangeInfo"
+    r = requests.get(url, params={"symbol": symbol.upper()}, timeout=30)
+    r.raise_for_status()
+    info = r.json()
+    syms = info.get("symbols", [])
+    if not syms:
+        raise RuntimeError(f"exchangeInfo: symbol not found: {symbol}")
+    filters = syms[0].get("filters", [])
+    tick = None
+    step = None
+    for f in filters:
+        ft = f.get("filterType")
+        if ft == "PRICE_FILTER":
+            tick = float(f["tickSize"])
+        elif ft == "LOT_SIZE":
+            step = float(f["stepSize"])
+    if tick is None:
+        tick = 0.01
+    if step is None:
+        step = 1.0
+    return tick, step
+
+
+def qty_scale_from_step(step_size: float) -> int:
+    """
+    Convert step_size into a power-of-10 fixed-point scale if possible.
+    Example: 0.001 -> 1000
+    """
+    # Represent as string to count decimals similarly to Rust implementation
+    s = f"{step_size:.16f}".rstrip("0").rstrip(".")
+    if "." not in s:
+        return 1
+    dec = len(s.split(".")[1])
+    return int(10 ** dec)
+
+
+def emit_orders_json(
+    out_path: Path,
+    strategy_name: str,
+    symbol: str,
+    exchange: str,
+    side: str,
+    quantity_u32: int,
+) -> None:
+    """
+    Emit an OrderFile JSON compatible with kubera-runner backtest-kitesim.
+    This emits ONE MultiLegOrder with ONE leg (spot smoke / intent test).
+    """
+    order = {
+        "strategy_name": strategy_name,
+        "legs": [
+            {
+                "tradingsymbol": symbol,
+                "exchange": exchange,
+                "side": side,
+                "quantity": int(quantity_u32),
+                "order_type": "Market",
+                "price": None,
+            }
+        ],
+        "total_margin_required": 0.0,
+    }
+    payload = {"strategy_name": strategy_name, "orders": [order]}
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2))
+
+
+def run_hydra_quicktest(
+    ohlcv: pd.DataFrame,
+    fees_bps: float,
+    slippage_bps: float,
+    out_dir: Path,
+    threshold: float,
+    emit_orders: bool,
+    orders_out: Optional[Path],
+    orders_qty_base: float,
+    venue_exchange: str,
+) -> None:
+    """
+    HYDRA-lite quick test:
+    - compute experts + ensemble score
+    - run long-only VBT portfolio using score thresholding
+    - emit artifacts and (optionally) one orders.json for KiteSim smoke validation
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    close = ohlcv["close"]
+    experts = hydra_experts(ohlcv)
+    score = hydra_ensemble_score(experts)
+
+    entries, exits = score_to_signals(score, threshold=threshold)
+
+    fees = (fees_bps + slippage_bps) / 1e4
+    pf = vbt.Portfolio.from_signals(close, entries, exits, fees=fees, freq="1T")
+
+    # artifacts
+    experts.to_csv(out_dir / "experts.csv", index_label="ts")
+    pd.DataFrame({"close": close, "hydra_score": score}).to_csv(out_dir / "score.csv", index_label="ts")
+    pd.DataFrame({"entry": entries.astype(int), "exit": exits.astype(int)}).to_csv(out_dir / "signals.csv", index_label="ts")
+
+    eq = pd.DataFrame({"close": close, "equity": pf.value})
+    eq.to_csv(out_dir / "equity.csv", index_label="ts")
+
+    summary = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "engine": "vectorbtpro",
+        "mode": "hydra_lite",
+        "fees_bps": fees_bps,
+        "slippage_bps": slippage_bps,
+        "threshold": threshold,
+        "stats": _pf_stats(pf),
+    }
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+
+    if emit_orders:
+        if orders_out is None:
+            orders_out = out_dir / "orders.json"
+        # Determine trade direction from latest score
+        last = float(score.iloc[-1])
+        if last > threshold:
+            side = "Buy"
+        elif last < -threshold:
+            side = "Sell"
+        else:
+            # No clear intent; do not emit orders
+            return
+
+        # Determine qty_scale from exchangeInfo, convert base qty to internal u32
+        try:
+            _, step = fetch_binance_exchangeinfo_specs(symbol=str(ohlcv.attrs.get("symbol", "BTCUSDT")))
+        except Exception:
+            step = 1.0
+        scale = qty_scale_from_step(step)
+        qty_u32 = int(round(orders_qty_base * scale))
+        if qty_u32 <= 0:
+            qty_u32 = scale  # minimum 1 step
+
+        emit_orders_json(
+            out_path=orders_out,
+            strategy_name=summary.get("mode", "HYDRA_LITE").upper(),
+            symbol=str(ohlcv.attrs.get("symbol", "BTCUSDT")),
+            exchange=venue_exchange,
+            side=side,
+            quantity_u32=qty_u32,
+        )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", required=True, help="e.g., BTCUSDT")
@@ -261,6 +512,13 @@ def main() -> int:
     ap.add_argument("--fees-bps", type=float, default=1.0, help="Fees in bps (rough)")
     ap.add_argument("--slippage-bps", type=float, default=0.5, help="Slippage in bps (rough)")
     ap.add_argument("--force-fetch", action="store_true", help="Ignore cache and refetch")
+    ap.add_argument("--mode", default="hydra", choices=["hydra", "baselines"], help="Run HYDRA-lite or baseline strategies")
+    ap.add_argument("--threshold", type=float, default=0.15, help="HYDRA score threshold for long entry")
+    ap.add_argument("--emit-orders", action="store_true", help="Emit orders.json compatible with backtest-kitesim (single-leg intent)")
+    ap.add_argument("--orders-out", default=None, help="Path to write orders.json (default: <out_dir>/orders.json)")
+    ap.add_argument("--orders-qty-base", type=float, default=0.001, help="Base quantity for orders (e.g., 0.001 BTC). Will be quantized by stepSize.")
+    ap.add_argument("--venue-exchange", default="BINANCE", help="Exchange field to put into LegOrder.exchange")
+
     args = ap.parse_args()
 
     def parse_dt(s: Optional[str]) -> Optional[int]:
@@ -279,13 +537,30 @@ def main() -> int:
     cache_dir = Path(args.cache_dir)
     out_dir = Path(args.out) / f"{cfg.symbol}_{cfg.interval}"
     df = load_or_fetch(cache_dir, cfg, force=args.force_fetch)
+    df.attrs['symbol'] = cfg.symbol
 
     # Basic sanity
     if df.empty or df["close"].isna().all():
         raise RuntimeError("Empty or invalid klines dataframe")
 
-    run_baselines(df, fees_bps=args.fees_bps, slippage_bps=args.slippage_bps, out_dir=out_dir)
+    if args.mode == 'baselines':
+        run_baselines(df, fees_bps=args.fees_bps, slippage_bps=args.slippage_bps, out_dir=out_dir)
+    else:
+        orders_out = Path(args.orders_out) if args.orders_out is not None else None
+        run_hydra_quicktest(
+            df,
+            fees_bps=args.fees_bps,
+            slippage_bps=args.slippage_bps,
+            out_dir=out_dir,
+            threshold=args.threshold,
+            emit_orders=args.emit_orders,
+            orders_out=orders_out,
+            orders_qty_base=args.orders_qty_base,
+            venue_exchange=args.venue_exchange,
+        )
     print(f"[OK] Wrote artifacts to: {out_dir}")
+    if args.emit_orders:
+        print("[OK] orders.json emitted (if score exceeded threshold).")
     return 0
 
 
