@@ -210,21 +210,21 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
                     break;
                 }
                 if let Some(ev) = feed.next() {
-                    sim.ingest_event(&ev);
+                    sim.ingest_event(&ev)?;
                 }
             }
 
             // Set simulator clock to intent time and execute
             sim.set_now(target_ts);
             let mut coord = MultiLegCoordinator::new(&mut sim, policy.clone());
-            let res = coord.execute_with_feed(&intent.order, &mut feed).await;
+            let res = coord.execute_with_feed(&intent.order, &mut feed).await?;
             all_results.push(res);
         }
     } else {
         // Bulk orders mode (original behavior)
         for order in order_file.orders.iter() {
             let mut coord = MultiLegCoordinator::new(&mut sim, policy.clone());
-            let res = coord.execute_with_feed(order, &mut feed).await;
+            let res = coord.execute_with_feed(order, &mut feed).await?;
             all_results.push(res);
         }
     }

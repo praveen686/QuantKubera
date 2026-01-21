@@ -13,6 +13,8 @@ kubera-executor = { path = "../kubera-executor" }
 kubera-risk = { path = "../kubera-risk" }
 kubera-connectors = { path = "../kubera-connectors" }
 kubera-options = { path = "../kubera-options" }
+kubera-sbe = { path = "../kubera-sbe" }
+url = "2"
 tokio = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }

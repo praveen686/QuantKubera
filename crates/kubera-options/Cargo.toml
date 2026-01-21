@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 kubera-models = { path = "../kubera-models" }
+kubera-core = { path = "../kubera-core" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

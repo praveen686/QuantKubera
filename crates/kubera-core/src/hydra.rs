@@ -42,7 +42,7 @@
 //! ```
 
 use kubera_models::{MarketEvent, OrderEvent, SignalEvent, MarketPayload, Side, OrderPayload, L2Update};
-use kubera_options::{OptionGreeks, OptionType};
+use kubera_models::{OptionGreeks, OptionType};
 use crate::EventBus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

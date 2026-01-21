@@ -140,6 +140,7 @@ pub async fn capture_depth_jsonl(
             .collect();
 
         // Create DepthEvent
+        // NOTE: This JSON capture is DEPRECATED. Use SBE capture for production.
         let depth_event = DepthEvent {
             ts: ms_to_dt(ev.event_time_ms),
             tradingsymbol: ev.symbol,
@@ -149,6 +150,7 @@ pub async fn capture_depth_jsonl(
             qty_exponent,
             bids,
             asks,
+            is_snapshot: false, // JSON diffs are never snapshots
         };
 
         // Write as JSONL
@@ -192,6 +194,7 @@ mod tests {
             qty_exponent: -8,
             bids: vec![DepthLevel { price: 9000012, qty: 150000000 }],
             asks: vec![DepthLevel { price: 9000100, qty: 200000000 }],
+            is_snapshot: false,
         };
 
         let json = serde_json::to_string(&event).unwrap();

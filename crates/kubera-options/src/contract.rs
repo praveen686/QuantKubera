@@ -14,24 +14,8 @@
 use chrono::{NaiveDate, Datelike, Weekday};
 use serde::{Deserialize, Serialize};
 
-/// Classification of the option right: Call (CE) or Put (PE).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OptionType {
-    /// Right to buy.
-    Call,
-    /// Right to sell.
-    Put,
-}
-
-impl OptionType {
-    /// Static string representation used in NSE ticker symbols.
-    pub fn symbol_suffix(&self) -> &'static str {
-        match self {
-            OptionType::Call => "CE",
-            OptionType::Put => "PE",
-        }
-    }
-}
+// Re-export OptionType from kubera_models (canonical location)
+pub use kubera_models::OptionType;
 
 /// Logical model of a single derivative contract.
 ///

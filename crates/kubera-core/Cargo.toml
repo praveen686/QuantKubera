@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 kubera-models = { path = "../kubera-models" }
-kubera-options = { path = "../kubera-options" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

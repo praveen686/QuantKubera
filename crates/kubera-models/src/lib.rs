@@ -16,6 +16,11 @@
 //! └── PortfolioSnapshot (position state)
 //! ```
 //!
+//! ## Deterministic Replay Types
+//! The `depth` module provides scaled-integer types for deterministic L2 replay:
+//! - `DepthEvent`: Order book update with gap detection
+//! - `DepthLevel`: Single price level (mantissa representation)
+//!
 //! ## References
 //! - IEEE Std 1016-2009: Software Design Descriptions
 //! - FIX Protocol 5.0 SP2 for field naming conventions
@@ -23,6 +28,14 @@
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
+
+// Deterministic depth types for L2 replay (scaled integers, gap detection)
+pub mod depth;
+pub use depth::{DepthEvent, DepthLevel};
+
+// Option Greeks and pricing primitives (moved here to break dependency cycles)
+pub mod greeks;
+pub use greeks::{OptionGreeks, OptionType};
 
 /// Market data event from exchange or data feed.
 ///

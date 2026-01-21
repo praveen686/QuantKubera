@@ -20,6 +20,44 @@ use crate::specs::SpecStore;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+// Use the canonical OrderBook from kubera-core (proper dependency layering)
+use kubera_core::lob::OrderBook;
+
+/// Errors that can occur during KiteSim execution.
+#[derive(Debug, Clone)]
+pub enum KiteSimError {
+    /// Gap detected in depth update sequence.
+    /// This is a HARD FAILURE - replay data is corrupted or incomplete.
+    DepthSequenceGap {
+        symbol: String,
+        expected: u64,
+        actual: u64,
+    },
+    /// Price or quantity exponent mismatch in depth event.
+    ExponentMismatch {
+        symbol: String,
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for KiteSimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KiteSimError::DepthSequenceGap { symbol, expected, actual } => {
+                write!(
+                    f,
+                    "FATAL: Depth sequence gap for {}: expected update_id={}, got {} (gap={})",
+                    symbol, expected, actual, actual.saturating_sub(*expected)
+                )
+            }
+            KiteSimError::ExponentMismatch { symbol, detail } => {
+                write!(f, "Exponent mismatch for {}: {}", symbol, detail)
+            }
+        }
+    }
+}
+
+impl std::error::Error for KiteSimError {}
 
 /// Execution mode for the simulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -116,146 +154,9 @@ impl SimOrder {
 }
 
 /// L2 order book wrapper for KiteSim.
-/// Stores the order book along with its exponents for price/qty conversion.
-#[derive(Debug, Clone)]
-pub struct SimOrderBook {
-    /// Price mantissa → quantity mantissa
-    bids: std::collections::BTreeMap<i64, i64>,
-    /// Price mantissa → quantity mantissa
-    asks: std::collections::BTreeMap<i64, i64>,
-    /// Price exponent: actual_price = mantissa * 10^price_exponent
-    price_exponent: i8,
-    /// Quantity exponent: actual_qty = mantissa * 10^qty_exponent
-    qty_exponent: i8,
-    /// Last processed update ID for gap detection.
-    last_update_id: u64,
-}
-
-impl SimOrderBook {
-    fn new(price_exponent: i8, qty_exponent: i8) -> Self {
-        Self {
-            bids: std::collections::BTreeMap::new(),
-            asks: std::collections::BTreeMap::new(),
-            price_exponent,
-            qty_exponent,
-            last_update_id: 0,
-        }
-    }
-
-    fn price_to_f64(&self, mantissa: i64) -> f64 {
-        mantissa as f64 * 10f64.powi(self.price_exponent as i32)
-    }
-
-    fn qty_to_f64(&self, mantissa: i64) -> f64 {
-        mantissa as f64 * 10f64.powi(self.qty_exponent as i32)
-    }
-
-    fn best_bid(&self) -> Option<(f64, f64)> {
-        self.bids.iter().next_back().map(|(&p, &q)| (self.price_to_f64(p), self.qty_to_f64(q)))
-    }
-
-    fn best_ask(&self) -> Option<(f64, f64)> {
-        self.asks.iter().next().map(|(&p, &q)| (self.price_to_f64(p), self.qty_to_f64(q)))
-    }
-
-    fn mid(&self) -> Option<f64> {
-        match (self.best_bid(), self.best_ask()) {
-            (Some((bid, _)), Some((ask, _))) => Some((bid + ask) / 2.0),
-            _ => None,
-        }
-    }
-
-    /// Simulates a market buy, walking through ask levels.
-    /// Returns (avg_price, filled_qty) or None if no liquidity.
-    fn simulate_market_buy(&self, qty: f64) -> Option<(f64, f64)> {
-        let qty_mantissa = (qty / 10f64.powi(self.qty_exponent as i32)).round() as i64;
-        let mut remaining = qty_mantissa;
-        let mut total_cost = 0i128;
-        let mut total_filled = 0i64;
-
-        for (&price, &level_qty) in self.asks.iter() {
-            if remaining <= 0 {
-                break;
-            }
-            let fill = remaining.min(level_qty);
-            total_cost += (price as i128) * (fill as i128);
-            total_filled += fill;
-            remaining -= fill;
-        }
-
-        if total_filled == 0 {
-            return None;
-        }
-
-        let cost_f64 = (total_cost as f64) * 10f64.powi((self.price_exponent + self.qty_exponent) as i32);
-        let filled_f64 = self.qty_to_f64(total_filled);
-        let avg_price = cost_f64 / filled_f64;
-
-        Some((avg_price, filled_f64))
-    }
-
-    /// Simulates a market sell, walking through bid levels.
-    /// Returns (avg_price, filled_qty) or None if no liquidity.
-    fn simulate_market_sell(&self, qty: f64) -> Option<(f64, f64)> {
-        let qty_mantissa = (qty / 10f64.powi(self.qty_exponent as i32)).round() as i64;
-        let mut remaining = qty_mantissa;
-        let mut total_proceeds = 0i128;
-        let mut total_filled = 0i64;
-
-        for (&price, &level_qty) in self.bids.iter().rev() {
-            if remaining <= 0 {
-                break;
-            }
-            let fill = remaining.min(level_qty);
-            total_proceeds += (price as i128) * (fill as i128);
-            total_filled += fill;
-            remaining -= fill;
-        }
-
-        if total_filled == 0 {
-            return None;
-        }
-
-        let proceeds_f64 = (total_proceeds as f64) * 10f64.powi((self.price_exponent + self.qty_exponent) as i32);
-        let filled_f64 = self.qty_to_f64(total_filled);
-        let avg_price = proceeds_f64 / filled_f64;
-
-        Some((avg_price, filled_f64))
-    }
-
-    /// Apply a depth event to the order book.
-    fn apply_depth(&mut self, event: &DepthEvent) -> Result<(), String> {
-        // Gap detection
-        if self.last_update_id > 0 && event.first_update_id != self.last_update_id + 1 {
-            return Err(format!(
-                "Sequence gap: expected {}, got {}",
-                self.last_update_id + 1,
-                event.first_update_id
-            ));
-        }
-
-        // Apply bid updates
-        for level in &event.bids {
-            if level.qty == 0 {
-                self.bids.remove(&level.price);
-            } else {
-                self.bids.insert(level.price, level.qty);
-            }
-        }
-
-        // Apply ask updates
-        for level in &event.asks {
-            if level.qty == 0 {
-                self.asks.remove(&level.price);
-            } else {
-                self.asks.insert(level.price, level.qty);
-            }
-        }
-
-        self.last_update_id = event.last_update_id;
-        Ok(())
-    }
-}
+// NOTE: SimOrderBook has been replaced by kubera_core::lob::OrderBook
+// This is the canonical LOB implementation with proper layering:
+// kubera-models → kubera-core → kubera-options
 
 /// Primary simulator: accepts quote events and matches eligible orders.
 pub struct KiteSim {
@@ -263,7 +164,8 @@ pub struct KiteSim {
     specs: Option<SpecStore>,
     last_quotes: HashMap<String, Quote>,
     /// L2 order books per symbol (only used in L2Book mode).
-    order_books: HashMap<String, SimOrderBook>,
+    /// Uses the canonical OrderBook from kubera-core.
+    order_books: HashMap<String, OrderBook>,
     orders: HashMap<String, SimOrder>,
     stats: KiteSimRunStats,
     next_id: AtomicU64,
@@ -301,9 +203,15 @@ impl KiteSim {
     }
 
     /// Ingest a replay event (updates book state without advancing clock).
-    pub fn ingest_event(&mut self, event: &ReplayEvent) {
+    ///
+    /// # Errors
+    /// Returns `KiteSimError::DepthSequenceGap` if a depth sequence gap is detected.
+    pub fn ingest_event(&mut self, event: &ReplayEvent) -> Result<(), KiteSimError> {
         match event {
-            ReplayEvent::Quote(q) => self.on_quote(q.clone()),
+            ReplayEvent::Quote(q) => {
+                self.on_quote(q.clone());
+                Ok(())
+            }
             ReplayEvent::Depth(d) => self.on_depth(d.clone()),
         }
     }
@@ -369,10 +277,16 @@ impl KiteSim {
     }
 
     /// Advances simulator time and processes a single replay event.
-    pub fn on_event(&mut self, event: ReplayEvent) {
+    ///
+    /// # Errors
+    /// Returns `KiteSimError::DepthSequenceGap` if a depth sequence gap is detected.
+    pub fn on_event(&mut self, event: ReplayEvent) -> Result<(), KiteSimError> {
         self.now = event.ts();
         match event {
-            ReplayEvent::Quote(q) => self.on_quote(q),
+            ReplayEvent::Quote(q) => {
+                self.on_quote(q);
+                Ok(())
+            }
             ReplayEvent::Depth(d) => self.on_depth(d),
         }
     }
@@ -380,26 +294,46 @@ impl KiteSim {
     /// Process an L2 depth event.
     /// In L2Book mode: updates the order book and triggers matching.
     /// In L1Quote mode: ignored (use on_quote for L1).
-    pub fn on_depth(&mut self, d: DepthEvent) {
+    ///
+    /// # Errors
+    /// Returns `KiteSimError::DepthSequenceGap` if a gap is detected in update IDs.
+    /// This is a HARD FAILURE - the caller MUST abort replay on this error.
+    pub fn on_depth(&mut self, d: DepthEvent) -> Result<(), KiteSimError> {
         if self.cfg.execution_mode != SimExecutionMode::L2Book {
-            return; // Ignore depth events in L1 mode
+            return Ok(()); // Ignore depth events in L1 mode
         }
 
         let symbol = d.tradingsymbol.clone();
 
+        // Handle snapshot vs diff
+        let is_snapshot = d.is_snapshot;
+
         // Get or create the order book for this symbol
+        // OrderBook requires (symbol, price_exponent, qty_exponent)
         let book = self.order_books.entry(symbol.clone()).or_insert_with(|| {
-            SimOrderBook::new(d.price_exponent, d.qty_exponent)
+            OrderBook::new(symbol.clone(), d.price_exponent, d.qty_exponent)
         });
 
-        // Apply the depth update
-        if let Err(e) = book.apply_depth(&d) {
-            tracing::warn!("Depth update error for {}: {}", symbol, e);
-            return;
+        // Apply the depth update with strict gap checking
+        if is_snapshot {
+            // Snapshots bypass gap checking - they reset the book
+            book.clear();
+            book.apply_depth_event_unchecked(&d);
+        } else {
+            // Diffs require strict gap checking - HARD FAIL on gaps
+            if let Err(_e) = book.apply_depth_event(&d) {
+                // This is a HARD FAILURE - do NOT continue
+                return Err(KiteSimError::DepthSequenceGap {
+                    symbol: symbol.clone(),
+                    expected: book.last_update_id() + 1,
+                    actual: d.first_update_id,
+                });
+            }
         }
 
         // Trigger order matching against the updated book
         self.match_eligible_orders_for_l2(&symbol);
+        Ok(())
     }
 
     pub fn on_quote(&mut self, q: QuoteEvent) {
@@ -443,8 +377,11 @@ impl KiteSim {
         };
 
         self.orders.insert(order_id.clone(), order);
-        // Attempt immediate match if we already have a quote and we're beyond latency.
-        self.match_eligible_orders_for(&leg.tradingsymbol);
+        // Attempt immediate match if we already have quote/book data and we're beyond latency.
+        match self.cfg.execution_mode {
+            SimExecutionMode::L2Book => self.match_eligible_orders_for_l2(&leg.tradingsymbol),
+            SimExecutionMode::L1Quote => self.match_eligible_orders_for(&leg.tradingsymbol),
+        }
         order_id
     }
 
@@ -497,7 +434,7 @@ impl KiteSim {
         let Some(book) = self.order_books.get(tradingsymbol) else { return; };
 
         // Extract book data to avoid borrow conflicts
-        let mid = book.mid();
+        let mid = book.mid_f64();
 
         // Collect order ids to process
         let ids: Vec<String> = self
@@ -535,13 +472,18 @@ impl KiteSim {
             // Get book reference again for simulation
             let Some(book) = self.order_books.get(tradingsymbol) else { continue; };
 
+            // Convert order quantity to mantissa for L2 book simulation
+            // qty_mantissa = qty * 10^(-qty_exponent)
+            let qty_mantissa = book.f64_to_qty(rem as f64);
+
             // Simulate the fill using the full order book
+            // Returns (total_cost, total_filled_f64, avg_price)
             let sim_result = match side {
-                LegSide::Buy => book.simulate_market_buy(rem as f64),
-                LegSide::Sell => book.simulate_market_sell(rem as f64),
+                LegSide::Buy => book.simulate_market_buy(qty_mantissa),
+                LegSide::Sell => book.simulate_market_sell(qty_mantissa),
             };
 
-            let Some((sim_avg_price, sim_filled_qty)) = sim_result else {
+            let Some((_sim_cost, sim_filled_qty, sim_avg_price)) = sim_result else {
                 continue; // No liquidity
             };
 
@@ -724,11 +666,15 @@ impl<'a> MultiLegCoordinator<'a> {
     /// - place leg i
     /// - wait until Filled / terminal / timeout
     /// - if failure, cancel remaining and optionally hedge filled legs
+    ///
+    /// # Errors
+    /// Returns `KiteSimError::DepthSequenceGap` if a depth sequence gap is detected.
+    /// This is a HARD FAILURE - the caller MUST abort the backtest on this error.
     pub async fn execute_with_feed(
         &mut self,
         order: &MultiLegOrder,
         feed: &mut crate::replay::ReplayFeed,
-    ) -> MultiLegResult {
+    ) -> Result<MultiLegResult, KiteSimError> {
         // Prime simulator time from first replay event to ensure order eligibility
         // aligns with event timestamps (critical for offline replay).
         if let Some(ev) = feed.peek() {
@@ -755,7 +701,7 @@ impl<'a> MultiLegCoordinator<'a> {
                 match feed.peek() {
                     Some(ev) if ev.ts() <= deadline => {
                         let ev = feed.next().expect("peek ensured Some");
-                        self.sim.on_event(ev);
+                        self.sim.on_event(ev)?;
                     }
                     _ => {
                         // No more events available in window.
@@ -803,21 +749,21 @@ impl<'a> MultiLegCoordinator<'a> {
             let this_ok = leg_results.last().map(|r| r.status == LegStatus::Filled).unwrap_or(false);
             if !this_ok {
                 self.rollback(&order.legs, &placed_ids, &leg_results).await;
-                return MultiLegResult {
+                return Ok(MultiLegResult {
                     strategy_name: order.strategy_name.clone(),
                     leg_results,
                     all_filled: false,
                     total_premium,
-                };
+                });
             }
         }
 
-        MultiLegResult {
+        Ok(MultiLegResult {
             strategy_name: order.strategy_name.clone(),
             leg_results,
             all_filled: true,
             total_premium,
-        }
+        })
     }
 
     async fn rollback(
@@ -865,14 +811,17 @@ impl<'a> MultiLegCoordinator<'a> {
 
     /// Execute with feed and collect stats (Patch 2 entrypoint).
     /// Wire stats to BacktestReport for certification.
+    ///
+    /// # Errors
+    /// Returns `KiteSimError::DepthSequenceGap` if a depth sequence gap is detected.
     pub async fn execute_with_feed_and_stats(
         &mut self,
         order: &MultiLegOrder,
         feed: &mut crate::replay::ReplayFeed,
-    ) -> (MultiLegResult, KiteSimRunStats) {
+    ) -> Result<(MultiLegResult, KiteSimRunStats), KiteSimError> {
         let mut stats = KiteSimRunStats::default();
 
-        let result = self.execute_with_feed(order, feed).await;
+        let result = self.execute_with_feed(order, feed).await?;
 
         if !result.all_filled {
             stats.rollbacks += 1;
@@ -881,7 +830,7 @@ impl<'a> MultiLegCoordinator<'a> {
         // TODO (Patch 3): Populate slippage_samples_bps from fill prices vs mid
         // TODO (Patch 3): Populate timeouts from reject_if_no_quote_after
 
-        (result, stats)
+        Ok((result, stats))
     }
 }
 
@@ -958,12 +907,183 @@ mod tests {
             hedge_on_failure: true,
         };
         let mut coord = MultiLegCoordinator::new(&mut sim, policy);
-        let res = coord.execute_with_feed(&order, &mut feed).await;
+        let res = coord.execute_with_feed(&order, &mut feed).await
+            .expect("execute_with_feed should not fail on L1 mode");
 
         assert!(!res.all_filled);
         assert_eq!(res.leg_results.len(), 2);
         assert_eq!(res.leg_results[0].status, LegStatus::Filled);
         assert_eq!(res.leg_results[1].status, LegStatus::PartiallyFilled);
         assert!(res.leg_results[1].error.as_ref().unwrap().contains("partial fill"));
+    }
+
+    /// P1.3: Golden determinism test - same input always produces identical output.
+    /// This verifies that replay is completely deterministic.
+    #[tokio::test]
+    async fn kitesim_l2_determinism_golden_test() {
+        use crate::replay::DepthEvent;
+        use crate::replay::DepthLevel;
+
+        // Fixed seed depth events (L2 mode)
+        let t0 = Utc.with_ymd_and_hms(2025, 1, 2, 9, 30, 0).unwrap();
+        let make_depth_events = || {
+            vec![
+                ReplayEvent::Depth(DepthEvent {
+                    ts: t0,
+                    tradingsymbol: "BTCUSDT".to_string(),
+                    first_update_id: 1000,
+                    last_update_id: 1000,
+                    price_exponent: -2,
+                    qty_exponent: -8,
+                    bids: vec![
+                        DepthLevel { price: 9000000, qty: 100000000 }, // 90000.00 @ 1.0
+                        DepthLevel { price: 8999500, qty: 200000000 }, // 89995.00 @ 2.0
+                    ],
+                    asks: vec![
+                        DepthLevel { price: 9000100, qty: 100000000 }, // 90001.00 @ 1.0
+                        DepthLevel { price: 9000500, qty: 200000000 }, // 90005.00 @ 2.0
+                    ],
+                    is_snapshot: true,
+                }),
+                ReplayEvent::Depth(DepthEvent {
+                    ts: t0 + Duration::milliseconds(100),
+                    tradingsymbol: "BTCUSDT".to_string(),
+                    first_update_id: 1001,
+                    last_update_id: 1001,
+                    price_exponent: -2,
+                    qty_exponent: -8,
+                    bids: vec![
+                        DepthLevel { price: 9000050, qty: 50000000 }, // 90000.50 @ 0.5
+                    ],
+                    asks: vec![
+                        DepthLevel { price: 9000100, qty: 150000000 }, // 90001.00 @ 1.5
+                    ],
+                    is_snapshot: false,
+                }),
+            ]
+        };
+
+        let order = MultiLegOrder {
+            strategy_name: "DETERMINISM-TEST".to_string(),
+            legs: vec![LegOrder {
+                tradingsymbol: "BTCUSDT".to_string(),
+                exchange: "BINANCE".to_string(),
+                side: LegSide::Buy,
+                quantity: 1, // Buy 1 unit (will be scaled by qty_exponent)
+                order_type: LegOrderType::Market,
+                price: None,
+            }],
+            total_margin_required: 0.0,
+        };
+
+        let policy = AtomicExecPolicy {
+            timeout: Duration::seconds(2),
+            hedge_on_failure: false,
+        };
+
+        // Run 1
+        let mut sim1 = KiteSim::new(KiteSimConfig {
+            latency: Duration::milliseconds(0),
+            allow_partial: true,
+            taker_slippage_bps: 0.0,
+            adverse_selection_max_bps: 0.0,
+            reject_if_no_quote_after: Duration::seconds(10),
+            execution_mode: SimExecutionMode::L2Book,
+        });
+        let mut feed1 = ReplayFeed::new(make_depth_events());
+        let mut coord1 = MultiLegCoordinator::new(&mut sim1, policy.clone());
+        let res1 = coord1.execute_with_feed(&order, &mut feed1).await
+            .expect("run 1 should succeed");
+
+        // Run 2 (identical input)
+        let mut sim2 = KiteSim::new(KiteSimConfig {
+            latency: Duration::milliseconds(0),
+            allow_partial: true,
+            taker_slippage_bps: 0.0,
+            adverse_selection_max_bps: 0.0,
+            reject_if_no_quote_after: Duration::seconds(10),
+            execution_mode: SimExecutionMode::L2Book,
+        });
+        let mut feed2 = ReplayFeed::new(make_depth_events());
+        let mut coord2 = MultiLegCoordinator::new(&mut sim2, policy.clone());
+        let res2 = coord2.execute_with_feed(&order, &mut feed2).await
+            .expect("run 2 should succeed");
+
+        // Golden assertion: results must be IDENTICAL
+        assert_eq!(res1.all_filled, res2.all_filled, "all_filled must match");
+        assert_eq!(res1.leg_results.len(), res2.leg_results.len(), "leg count must match");
+
+        for (lr1, lr2) in res1.leg_results.iter().zip(res2.leg_results.iter()) {
+            assert_eq!(lr1.status, lr2.status, "status must match");
+            assert_eq!(lr1.filled_qty, lr2.filled_qty, "filled_qty must match");
+            assert_eq!(lr1.fill_price, lr2.fill_price, "fill_price must match exactly");
+        }
+    }
+
+    /// P1.4: Gap detection test - missing depth update causes hard fail.
+    #[tokio::test]
+    async fn kitesim_l2_gap_detection_hard_fail() {
+        use crate::replay::DepthEvent;
+        use crate::replay::DepthLevel;
+
+        let t0 = Utc.with_ymd_and_hms(2025, 1, 2, 9, 30, 0).unwrap();
+
+        // Depth events with a GAP: snapshot at 1000, then diff at 1002 (missing 1001)
+        let events_with_gap = vec![
+            ReplayEvent::Depth(DepthEvent {
+                ts: t0,
+                tradingsymbol: "BTCUSDT".to_string(),
+                first_update_id: 1000,
+                last_update_id: 1000,
+                price_exponent: -2,
+                qty_exponent: -8,
+                bids: vec![DepthLevel { price: 9000000, qty: 100000000 }],
+                asks: vec![DepthLevel { price: 9000100, qty: 100000000 }],
+                is_snapshot: true,
+            }),
+            // GAP: first_update_id=1002 but last was 1000, expecting 1001
+            ReplayEvent::Depth(DepthEvent {
+                ts: t0 + Duration::milliseconds(100),
+                tradingsymbol: "BTCUSDT".to_string(),
+                first_update_id: 1002, // GAP!
+                last_update_id: 1002,
+                price_exponent: -2,
+                qty_exponent: -8,
+                bids: vec![DepthLevel { price: 9000050, qty: 50000000 }],
+                asks: vec![],
+                is_snapshot: false,
+            }),
+        ];
+
+        let mut sim = KiteSim::new(KiteSimConfig {
+            latency: Duration::milliseconds(0),
+            allow_partial: true,
+            taker_slippage_bps: 0.0,
+            adverse_selection_max_bps: 0.0,
+            reject_if_no_quote_after: Duration::seconds(10),
+            execution_mode: SimExecutionMode::L2Book,
+        });
+
+        // Manually process events to test gap detection
+        let mut feed = ReplayFeed::new(events_with_gap);
+
+        // First event (snapshot) should succeed
+        let ev1 = feed.next().unwrap();
+        let result1 = sim.on_event(ev1);
+        assert!(result1.is_ok(), "snapshot should succeed");
+
+        // Second event (with gap) should HARD FAIL
+        let ev2 = feed.next().unwrap();
+        let result2 = sim.on_event(ev2);
+
+        assert!(result2.is_err(), "gap should cause hard failure");
+        match result2 {
+            Err(KiteSimError::DepthSequenceGap { symbol, expected, actual }) => {
+                assert_eq!(symbol, "BTCUSDT");
+                assert_eq!(expected, 1001, "expected update ID should be 1001");
+                assert_eq!(actual, 1002, "actual update ID should be 1002");
+            }
+            _ => panic!("expected DepthSequenceGap error"),
+        }
     }
 }

@@ -31,7 +31,8 @@ mod circuit_breakers;
 mod kitesim_backtest;
 mod order_io;
 mod binance_capture;
-mod binance_depth_capture;
+mod binance_depth_capture;  // DEPRECATED: Use binance_sbe_depth_capture for production
+mod binance_sbe_depth_capture;  // SBE-based depth capture (Phase-2A authoritative)
 mod binance_exchange_info;
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
@@ -220,8 +221,32 @@ enum Commands {
         duration_secs: u64,
     },
 
-    /// Capture Binance Spot depth stream into DepthEvent JSONL (L2 replay).
+    /// [DEPRECATED] Capture Binance JSON depth stream. Use capture-sbe-depth instead.
     CaptureDepth {
+        /// Symbol, e.g. BTCUSDT
+        #[arg(long)]
+        symbol: String,
+
+        /// Output path, e.g. data/replay/binance/BTCUSDT_depth.jsonl
+        #[arg(long)]
+        out: String,
+
+        /// Capture duration in seconds
+        #[arg(long, default_value_t = 300)]
+        duration_secs: u64,
+
+        /// Price exponent for scaled integers (e.g., -2 for 2 decimal places)
+        #[arg(long, default_value_t = -2)]
+        price_exponent: i8,
+
+        /// Quantity exponent for scaled integers (e.g., -8 for 8 decimal places)
+        #[arg(long, default_value_t = -8)]
+        qty_exponent: i8,
+    },
+
+    /// Capture Binance SBE depth stream into DepthEvent JSONL (Phase-2A authoritative).
+    /// Includes proper bootstrap (REST snapshot + buffered diffs) for correctness.
+    CaptureSbeDepth {
         /// Symbol, e.g. BTCUSDT
         #[arg(long)]
         symbol: String,
@@ -412,6 +437,7 @@ async fn async_main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Commands::CaptureDepth { symbol, out, duration_secs, price_exponent, qty_exponent } => {
+                eprintln!("WARNING: capture-depth is DEPRECATED. Use capture-sbe-depth for production.");
                 let out_path = std::path::Path::new(&out);
                 if let Some(parent) = out_path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -426,6 +452,27 @@ async fn async_main() -> anyhow::Result<()> {
                     qty_exponent,
                 ).await?;
                 println!("Capture complete: {} ({} events)", out, count);
+                return Ok(());
+            }
+            Commands::CaptureSbeDepth { symbol, out, duration_secs, price_exponent, qty_exponent } => {
+                let out_path = std::path::Path::new(&out);
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // Requires BINANCE_API_KEY_ED25519 env var for SBE stream access
+                let api_key = std::env::var("BINANCE_API_KEY_ED25519")
+                    .map_err(|_| anyhow::anyhow!("BINANCE_API_KEY_ED25519 env var required for SBE stream"))?;
+                println!("Capturing Binance SBE {} depth stream for {} seconds (price_exp={}, qty_exp={})...",
+                    symbol, duration_secs, price_exponent, qty_exponent);
+                let stats = binance_sbe_depth_capture::capture_sbe_depth_jsonl(
+                    &symbol,
+                    out_path,
+                    duration_secs,
+                    price_exponent,
+                    qty_exponent,
+                    &api_key,
+                ).await?;
+                println!("Capture complete: {} ({})", out, stats);
                 return Ok(());
             }
             Commands::BacktestKitesim {

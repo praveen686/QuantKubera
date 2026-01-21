@@ -24,7 +24,8 @@
 
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use kubera_options::replay::DepthEvent;
+// Import from models (leaf crate) - breaks kubera-core -> kubera-options cycle
+use kubera_models::DepthEvent;
 
 /// Error types for order book operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,7 +529,7 @@ mod tests {
     #[test]
     fn test_apply_depth_event() {
         use chrono::Utc;
-        use kubera_options::replay::DepthLevel;
+        use kubera_models::DepthLevel;
 
         let mut book = OrderBook::new("BTCUSDT".to_string(), -2, -8);
 
@@ -546,6 +547,7 @@ mod tests {
             asks: vec![
                 DepthLevel { price: 9001000, qty: 50000000 },
             ],
+            is_snapshot: false,
         };
 
         book.apply_depth_event(&event).unwrap();
@@ -569,6 +571,7 @@ mod tests {
             qty_exponent: -8,
             bids: vec![],
             asks: vec![],
+            is_snapshot: false,
         };
 
         let result = book.apply_depth_event(&event);
@@ -590,6 +593,7 @@ mod tests {
             qty_exponent: -8,
             bids: vec![],
             asks: vec![],
+            is_snapshot: false,
         };
 
         let result = book.apply_depth_event(&event);
@@ -599,7 +603,7 @@ mod tests {
     #[test]
     fn test_depth_event_gap_detection() {
         use chrono::Utc;
-        use kubera_options::replay::DepthLevel;
+        use kubera_models::DepthLevel;
 
         let mut book = OrderBook::new("BTCUSDT".to_string(), -2, -8);
 
@@ -613,6 +617,7 @@ mod tests {
             qty_exponent: -8,
             bids: vec![DepthLevel { price: 9000000, qty: 100000000 }],
             asks: vec![],
+            is_snapshot: false,
         };
         book.apply_depth_event_unchecked(&event1);
 
@@ -626,6 +631,7 @@ mod tests {
             qty_exponent: -8,
             bids: vec![],
             asks: vec![],
+            is_snapshot: false,
         };
 
         let result = book.apply_depth_event(&event2);
