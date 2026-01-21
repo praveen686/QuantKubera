@@ -18,6 +18,7 @@ use kubera_options::replay::{QuoteEvent, ReplayEvent, ReplayFeed};
 use kubera_options::report::{BacktestReport, FillMetrics};
 use kubera_options::specs::SpecStore;
 
+use crate::binance_exchange_info::fetch_spot_specs;
 use crate::order_io::OrderFile;
 
 pub struct KiteSimCliConfig {
@@ -79,15 +80,30 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
         reject_if_no_quote_after: Duration::milliseconds(cfg.stale_quote_ms),
     });
 
-    // Build SpecStore with venue-specific defaults
+    // Build SpecStore with venue-specific specs
     let mut specs = SpecStore::new();
     if cfg.venue.to_lowercase() == "binance" {
-        // Minimal defaults for Binance Spot fixed-point quantities.
-        // tick_size here is a placeholder; you can refine per-symbol later.
-        let tick = 0.01_f64;
-        for o in order_file.orders.iter() {
-            for leg in o.legs.iter() {
-                specs.insert_with_scale(&leg.tradingsymbol, 1, tick, cfg.qty_scale);
+        // Collect all symbols from orders
+        let symbols: std::collections::HashSet<String> = order_file
+            .orders
+            .iter()
+            .flat_map(|o| o.legs.iter().map(|l| l.tradingsymbol.clone()))
+            .collect();
+
+        // Fetch real tick_size and qty_scale from Binance exchangeInfo
+        match fetch_spot_specs(&symbols) {
+            Ok(specs_map) => {
+                for (sym, (tick_size, qty_scale)) in specs_map {
+                    specs.insert_with_scale(&sym, 1, tick_size, qty_scale);
+                }
+            }
+            Err(e) => {
+                eprintln!("WARN: fetch_spot_specs failed ({}), using CLI defaults", e);
+                // Fallback: use CLI-provided qty_scale with placeholder tick
+                let tick = 0.01_f64;
+                for sym in &symbols {
+                    specs.insert_with_scale(sym, 1, tick, cfg.qty_scale);
+                }
             }
         }
     }

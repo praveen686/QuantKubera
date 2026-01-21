@@ -31,6 +31,7 @@ mod circuit_breakers;
 mod kitesim_backtest;
 mod order_io;
 mod binance_capture;
+mod binance_exchange_info;
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
 use tokio::time::Duration;

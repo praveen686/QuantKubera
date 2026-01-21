@@ -30,3 +30,5 @@ toml = "0.8"
 axum = { workspace = true, features = ["ws"] }
 tower-http = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+urlencoding = "2"
