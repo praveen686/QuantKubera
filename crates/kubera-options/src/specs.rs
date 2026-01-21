@@ -15,6 +15,10 @@ pub struct SpecStore {
 }
 
 impl SpecStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn insert(&mut self, sym: &str, lot: i64, tick: f64) {
         self.specs.insert(sym.to_string(), InstrumentSpec{lot_size: lot, tick_size: tick});
     }

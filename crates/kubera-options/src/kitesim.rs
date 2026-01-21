@@ -58,6 +58,10 @@ pub struct KiteSimRunStats {
     pub timeouts: u64,
     /// Number of multi-leg rollbacks triggered.
     pub rollbacks: u64,
+    /// Number of hedge orders attempted during rollback.
+    pub hedges_attempted: u64,
+    /// Number of hedge orders filled.
+    pub hedges_filled: u64,
     /// Slippage samples in basis points for analysis.
     pub slippage_samples_bps: Vec<f64>,
 }

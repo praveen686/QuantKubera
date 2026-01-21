@@ -17,7 +17,7 @@ use crate::strategy::OptionsStrategy;
 use serde::{Deserialize, Serialize};
 
 /// Composite order comprising multiple derivative contracts.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiLegOrder {
     pub strategy_name: String,
     pub legs: Vec<LegOrder>,
@@ -26,7 +26,7 @@ pub struct MultiLegOrder {
 }
 
 /// Unit order for a single contract within a strategy.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegOrder {
     pub tradingsymbol: String,
     pub exchange: String,
@@ -37,14 +37,14 @@ pub struct LegOrder {
 }
 
 /// Direction of the leg execution.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LegSide {
     Buy,
     Sell,
 }
 
 /// Constraint on execution price.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegOrderType {
     /// Immediate fill at current market price.
     Market,

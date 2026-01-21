@@ -9,12 +9,13 @@
 //! - Deterministic iteration for reproducible backtests
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Best bid/ask quote snapshot for an individual instrument.
 ///
 /// All prices are in *rupees* and quantities are in *contracts* (lot-adjusted
 /// quantities should be handled at a higher level).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuoteEvent {
     pub ts: DateTime<Utc>,
     pub tradingsymbol: String,
@@ -25,7 +26,7 @@ pub struct QuoteEvent {
 }
 
 /// Replay event stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReplayEvent {
     Quote(QuoteEvent),
 }

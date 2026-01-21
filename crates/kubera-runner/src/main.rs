@@ -29,12 +29,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod web_server;
 mod circuit_breakers;
 mod kitesim_backtest;
+mod order_io;
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
 use tokio::time::Duration;
 use uuid::Uuid;
 use chrono::Utc;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::fs;
 use tokio::process::Command;
 use tokio::net::TcpListener;
@@ -199,10 +200,59 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Offline KiteSim backtest runner (Mode B/C).
+    BacktestKitesim {
+        /// Strategy label (for report metadata only). If empty, uses orders file.
+        #[arg(long, default_value = "")]
+        strategy: String,
+
+        /// Path to replay quotes (JSONL of QuoteEvent).
+        #[arg(long)]
+        replay: String,
+
+        /// Path to orders JSON (OrderFile: {strategy_name, orders:[MultiLegOrder]}).
+        #[arg(long)]
+        orders: String,
+
+        /// Output directory for report.json
+        #[arg(long, default_value = "artifacts/kitesim")]
+        out: String,
+
+        /// Atomic execution timeout (milliseconds)
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: i64,
+
+        /// Simulated placement latency (milliseconds)
+        #[arg(long, default_value_t = 150)]
+        latency_ms: i64,
+
+        /// Taker slippage (bps) applied to marketable fills
+        #[arg(long, default_value_t = 0.0)]
+        slippage_bps: f64,
+
+        /// Adverse selection penalty cap (bps)
+        #[arg(long, default_value_t = 0.0)]
+        adverse_bps: f64,
+
+        /// Reject if last quote older than this (milliseconds)
+        #[arg(long, default_value_t = 10000)]
+        stale_quote_ms: i64,
+
+        /// Hedge on failure (rollback neutralization)
+        #[arg(long, default_value_t = true)]
+        hedge_on_failure: bool,
+    },
+}
+
 /// QuantKubera Trading Runner Command Line Interface
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Execution mode: paper, backtest, or live
     #[arg(short, long, default_value = "paper")]
     mode: String,
@@ -290,6 +340,39 @@ fn main() -> anyhow::Result<()> {
 
 async fn async_main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // Handle subcommands first
+    if let Some(cmd) = args.command {
+        match cmd {
+            Commands::BacktestKitesim {
+                strategy,
+                replay,
+                orders,
+                out,
+                timeout_ms,
+                latency_ms,
+                slippage_bps,
+                adverse_bps,
+                stale_quote_ms,
+                hedge_on_failure,
+            } => {
+                return kitesim_backtest::run_kitesim_backtest_cli(
+                    kitesim_backtest::KiteSimCliConfig {
+                        strategy_name: strategy,
+                        replay_path: replay,
+                        orders_path: orders,
+                        out_dir: out,
+                        timeout_ms,
+                        latency_ms,
+                        slippage_bps,
+                        adverse_bps,
+                        stale_quote_ms,
+                        hedge_on_failure,
+                    }
+                ).await;
+            }
+        }
+    }
 
     let mode = match args.mode.to_lowercase().as_str() {
         "backtest" => ExecutionMode::Backtest,
