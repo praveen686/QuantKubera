@@ -12,6 +12,12 @@ simulated = true
 slippage_bps = 2.0
 commission_model = "ZerodhaFnO"
 
+# [execution.lot_sizes] - optional, auto-detected for NSE symbols
+# NIFTY2612025400CE = 65
+# NIFTY2612025400PE = 65
+# NIFTY2612025450CE = 65
+# NIFTY2612025450PE = 65
+
 [strategy.aeon]
 # Informational Gating (BIF)
 entropy_word_len = 4
