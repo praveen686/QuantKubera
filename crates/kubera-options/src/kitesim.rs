@@ -923,6 +923,7 @@ mod tests {
     async fn kitesim_l2_determinism_golden_test() {
         use crate::replay::DepthEvent;
         use crate::replay::DepthLevel;
+        use kubera_models::IntegrityTier;
 
         // Fixed seed depth events (L2 mode)
         let t0 = Utc.with_ymd_and_hms(2025, 1, 2, 9, 30, 0).unwrap();
@@ -944,6 +945,8 @@ mod tests {
                         DepthLevel { price: 9000500, qty: 200000000 }, // 90005.00 @ 2.0
                     ],
                     is_snapshot: true,
+                    integrity_tier: IntegrityTier::Certified,
+                    source: None,
                 }),
                 ReplayEvent::Depth(DepthEvent {
                     ts: t0 + Duration::milliseconds(100),
@@ -959,6 +962,8 @@ mod tests {
                         DepthLevel { price: 9000100, qty: 150000000 }, // 90001.00 @ 1.5
                     ],
                     is_snapshot: false,
+                    integrity_tier: IntegrityTier::Certified,
+                    source: None,
                 }),
             ]
         };
@@ -1025,6 +1030,7 @@ mod tests {
     async fn kitesim_l2_gap_detection_hard_fail() {
         use crate::replay::DepthEvent;
         use crate::replay::DepthLevel;
+        use kubera_models::IntegrityTier;
 
         let t0 = Utc.with_ymd_and_hms(2025, 1, 2, 9, 30, 0).unwrap();
 
@@ -1040,6 +1046,8 @@ mod tests {
                 bids: vec![DepthLevel { price: 9000000, qty: 100000000 }],
                 asks: vec![DepthLevel { price: 9000100, qty: 100000000 }],
                 is_snapshot: true,
+                integrity_tier: IntegrityTier::Certified,
+                source: None,
             }),
             // GAP: first_update_id=1002 but last was 1000, expecting 1001
             ReplayEvent::Depth(DepthEvent {
@@ -1052,6 +1060,8 @@ mod tests {
                 bids: vec![DepthLevel { price: 9000050, qty: 50000000 }],
                 asks: vec![],
                 is_snapshot: false,
+                integrity_tier: IntegrityTier::Certified,
+                source: None,
             }),
         ];
 

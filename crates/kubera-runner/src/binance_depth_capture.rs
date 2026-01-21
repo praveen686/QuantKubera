@@ -1,10 +1,18 @@
 //! Binance depth capture (Spot) -> DepthEvent JSONL for L2 replay.
 //!
+//! ⚠️ DEPRECATED: This module uses JSON WebSocket depth stream.
+//! For production/certified replay, use `binance_sbe_depth_capture` instead.
+//!
 //! Uses Binance diff depth stream: orderbook deltas.
 //! Output format matches kubera-options::replay::DepthEvent (one JSON per line).
 //!
+//! ## Limitations (why this is deprecated)
+//! - JSON parsing uses f64 intermediate, potential cross-platform drift
+//! - No bootstrap protocol (REST snapshot + diff sync)
+//! - Missing update IDs can cause gaps
+//!
 //! Notes:
-//! - This is for TESTING and replay generation. No trading, no API keys required.
+//! - This is for DEBUGGING ONLY. Not suitable for certified replay.
 //! - Binance Spot is 24x7 so you can generate depth replay packs any time.
 //! - Uses scaled integers (mantissa + exponent) for deterministic replay.
 
@@ -15,6 +23,7 @@ use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
 use kubera_options::replay::{DepthEvent, DepthLevel};
+use kubera_models::IntegrityTier;
 
 /// Binance depth diff event from WebSocket.
 #[derive(Debug, serde::Deserialize)]
@@ -141,6 +150,7 @@ pub async fn capture_depth_jsonl(
 
         // Create DepthEvent
         // NOTE: This JSON capture is DEPRECATED. Use SBE capture for production.
+        // Marked as NON_CERTIFIED - will be rejected by certified replay mode.
         let depth_event = DepthEvent {
             ts: ms_to_dt(ev.event_time_ms),
             tradingsymbol: ev.symbol,
@@ -151,6 +161,8 @@ pub async fn capture_depth_jsonl(
             bids,
             asks,
             is_snapshot: false, // JSON diffs are never snapshots
+            integrity_tier: IntegrityTier::NonCertified,
+            source: Some("binance_json_depth_DEPRECATED".to_string()),
         };
 
         // Write as JSONL
@@ -195,10 +207,13 @@ mod tests {
             bids: vec![DepthLevel { price: 9000012, qty: 150000000 }],
             asks: vec![DepthLevel { price: 9000100, qty: 200000000 }],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::NonCertified,
+            source: Some("test".to_string()),
         };
 
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("BTCUSDT"));
         assert!(json.contains("9000012"));
+        assert!(json.contains("NON_CERTIFIED"));
     }
 }

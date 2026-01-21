@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn test_apply_depth_event() {
         use chrono::Utc;
-        use kubera_models::DepthLevel;
+        use kubera_models::{DepthLevel, IntegrityTier};
 
         let mut book = OrderBook::new("BTCUSDT".to_string(), -2, -8);
 
@@ -548,6 +548,8 @@ mod tests {
                 DepthLevel { price: 9001000, qty: 50000000 },
             ],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         book.apply_depth_event(&event).unwrap();
@@ -559,6 +561,7 @@ mod tests {
     #[test]
     fn test_depth_event_symbol_mismatch() {
         use chrono::Utc;
+        use kubera_models::IntegrityTier;
 
         let mut book = OrderBook::new("BTCUSDT".to_string(), -2, -8);
 
@@ -572,6 +575,8 @@ mod tests {
             bids: vec![],
             asks: vec![],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         let result = book.apply_depth_event(&event);
@@ -581,6 +586,7 @@ mod tests {
     #[test]
     fn test_depth_event_exponent_mismatch() {
         use chrono::Utc;
+        use kubera_models::IntegrityTier;
 
         let mut book = OrderBook::new("BTCUSDT".to_string(), -2, -8);
 
@@ -594,6 +600,8 @@ mod tests {
             bids: vec![],
             asks: vec![],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         let result = book.apply_depth_event(&event);
@@ -603,7 +611,7 @@ mod tests {
     #[test]
     fn test_depth_event_gap_detection() {
         use chrono::Utc;
-        use kubera_models::DepthLevel;
+        use kubera_models::{DepthLevel, IntegrityTier};
 
         let mut book = OrderBook::new("BTCUSDT".to_string(), -2, -8);
 
@@ -618,6 +626,8 @@ mod tests {
             bids: vec![DepthLevel { price: 9000000, qty: 100000000 }],
             asks: vec![],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
         book.apply_depth_event_unchecked(&event1);
 
@@ -632,6 +642,8 @@ mod tests {
             bids: vec![],
             asks: vec![],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         let result = book.apply_depth_event(&event2);

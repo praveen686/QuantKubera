@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 // Deterministic depth types for L2 replay (scaled integers, gap detection)
 pub mod depth;
-pub use depth::{DepthEvent, DepthLevel};
+pub use depth::{DepthEvent, DepthLevel, IntegrityTier};
 
 // Option Greeks and pricing primitives (moved here to break dependency cycles)
 pub mod greeks;

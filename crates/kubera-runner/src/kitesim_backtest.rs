@@ -17,6 +17,7 @@ use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLeg
 use kubera_options::replay::{QuoteEvent, DepthEvent, ReplayEvent, ReplayFeed};
 use kubera_options::report::{BacktestReport, FillMetrics};
 use kubera_options::specs::SpecStore;
+use kubera_models::IntegrityTier;
 
 use crate::binance_exchange_info::fetch_spot_specs;
 use crate::order_io::OrderFile;
@@ -52,6 +53,9 @@ pub struct KiteSimCliConfig {
     pub adverse_bps: f64,
     pub stale_quote_ms: i64,
     pub hedge_on_failure: bool,
+    /// If true, reject any depth events with NON_CERTIFIED integrity tier.
+    /// Use this for production backtests to ensure only SBE-captured data is used.
+    pub certified: bool,
 }
 
 fn parse_rfc3339_utc(s: &str) -> Result<DateTime<Utc>> {
@@ -74,15 +78,33 @@ pub fn load_quotes_jsonl(path: &Path) -> Result<Vec<ReplayEvent>> {
 }
 
 /// Load JSONL depth events. Each line must be a DepthEvent JSON object.
-pub fn load_depth_jsonl(path: &Path) -> Result<Vec<ReplayEvent>> {
+/// If `certified` is true, rejects any event with NON_CERTIFIED integrity tier.
+pub fn load_depth_jsonl(path: &Path, certified: bool) -> Result<Vec<ReplayEvent>> {
     let f = File::open(path).with_context(|| format!("open depth file: {:?}", path))?;
     let br = BufReader::new(f);
     let mut out = Vec::new();
+    let mut non_certified_count = 0;
     for (i, line) in br.lines().enumerate() {
         let line = line.with_context(|| format!("read line {}", i + 1))?;
         if line.trim().is_empty() { continue; }
         let d: DepthEvent = serde_json::from_str(&line)
             .with_context(|| format!("parse DepthEvent JSON on line {}", i + 1))?;
+
+        // Check integrity tier in certified mode
+        if certified && !d.integrity_tier.is_certified() {
+            non_certified_count += 1;
+            if non_certified_count == 1 {
+                // Log source on first encounter
+                let source = d.source.as_deref().unwrap_or("unknown");
+                anyhow::bail!(
+                    "CERTIFIED MODE: Rejected NON_CERTIFIED depth event on line {} (source: {}). \
+                    Use SBE capture (capture-sbe-depth) for certified replay data.",
+                    i + 1,
+                    source
+                );
+            }
+        }
+
         out.push(ReplayEvent::Depth(d));
     }
     Ok(out)
@@ -117,7 +139,10 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
     let mut replay_events = load_quotes_jsonl(replay_path)?;
 
     if let Some(ref depth_path) = cfg.depth_path {
-        let depth_events = load_depth_jsonl(Path::new(depth_path))?;
+        if cfg.certified {
+            println!("CERTIFIED MODE: Only accepting SBE-captured depth data");
+        }
+        let depth_events = load_depth_jsonl(Path::new(depth_path), cfg.certified)?;
         println!("Loaded {} depth events for L2Book mode", depth_events.len());
         replay_events.extend(depth_events);
     }

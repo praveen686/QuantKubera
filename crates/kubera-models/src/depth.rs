@@ -18,6 +18,34 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Integrity tier for depth data certification.
+///
+/// - `Certified`: SBE-based capture with proper bootstrap (production-grade)
+/// - `NonCertified`: JSON-based capture (deprecated, debugging only)
+///
+/// ## Backward Compatibility
+/// Default is `NonCertified` for safety - old logs without this field
+/// are treated as non-certified until provenance can be verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum IntegrityTier {
+    /// SBE-based depth capture with proper bootstrap protocol.
+    /// Suitable for production backtesting and certification.
+    Certified,
+    /// JSON-based depth capture (deprecated).
+    /// NOT suitable for certified replay - debugging only.
+    /// This is the DEFAULT for backward compatibility with old logs.
+    #[default]
+    NonCertified,
+}
+
+impl IntegrityTier {
+    /// Returns true if this tier is acceptable for certified replay.
+    pub fn is_certified(&self) -> bool {
+        matches!(self, IntegrityTier::Certified)
+    }
+}
+
 /// A single price level in the order book (scaled integers for determinism).
 ///
 /// Prices and quantities are stored as mantissas. The actual value is:
@@ -88,6 +116,14 @@ pub struct DepthEvent {
     /// Snapshots replace the entire book; diffs are applied incrementally.
     #[serde(default)]
     pub is_snapshot: bool,
+    /// Integrity tier indicating data source quality.
+    /// - `Certified`: SBE capture (production-grade)
+    /// - `NonCertified`: JSON capture (deprecated)
+    #[serde(default)]
+    pub integrity_tier: IntegrityTier,
+    /// Optional source identifier for debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl DepthEvent {
@@ -170,6 +206,8 @@ mod tests {
                 DepthLevel { price: 9000500, qty: 200000000 },
             ],
             is_snapshot: true,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         let best_bid = event.best_bid_f64().unwrap();
@@ -193,6 +231,8 @@ mod tests {
             bids: vec![],
             asks: vec![],
             is_snapshot: true,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         let diff = DepthEvent {
@@ -205,9 +245,64 @@ mod tests {
             bids: vec![],
             asks: vec![],
             is_snapshot: false,
+            integrity_tier: IntegrityTier::Certified,
+            source: None,
         };
 
         // Snapshot should sort before diff at same timestamp
         assert!(snapshot.sort_key() < diff.sort_key());
+    }
+
+    #[test]
+    fn test_integrity_tier() {
+        assert!(IntegrityTier::Certified.is_certified());
+        assert!(!IntegrityTier::NonCertified.is_certified());
+    }
+
+    #[test]
+    fn test_backward_compat_missing_integrity_tier() {
+        // Old log format without integrity_tier field should default to NonCertified
+        let old_format_json = r#"{
+            "ts": "2025-01-01T00:00:00Z",
+            "tradingsymbol": "BTCUSDT",
+            "first_update_id": 100,
+            "last_update_id": 100,
+            "price_exponent": -2,
+            "qty_exponent": -8,
+            "bids": [],
+            "asks": [],
+            "is_snapshot": false
+        }"#;
+
+        let event: DepthEvent = serde_json::from_str(old_format_json).unwrap();
+
+        // Old logs default to NonCertified for safety
+        assert_eq!(event.integrity_tier, IntegrityTier::NonCertified);
+        assert!(!event.integrity_tier.is_certified());
+        assert!(event.source.is_none());
+    }
+
+    #[test]
+    fn test_new_format_certified() {
+        // New log format with CERTIFIED tier
+        let new_format_json = r#"{
+            "ts": "2025-01-01T00:00:00Z",
+            "tradingsymbol": "BTCUSDT",
+            "first_update_id": 100,
+            "last_update_id": 100,
+            "price_exponent": -2,
+            "qty_exponent": -8,
+            "bids": [],
+            "asks": [],
+            "is_snapshot": true,
+            "integrity_tier": "CERTIFIED",
+            "source": "binance_sbe_depth_capture"
+        }"#;
+
+        let event: DepthEvent = serde_json::from_str(new_format_json).unwrap();
+
+        assert_eq!(event.integrity_tier, IntegrityTier::Certified);
+        assert!(event.integrity_tier.is_certified());
+        assert_eq!(event.source, Some("binance_sbe_depth_capture".to_string()));
     }
 }

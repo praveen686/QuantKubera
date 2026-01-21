@@ -28,6 +28,7 @@ use url::Url;
 
 use kubera_sbe::{SbeHeader, BinanceSbeDecoder, DepthUpdate, SBE_HEADER_SIZE};
 use kubera_options::replay::{DepthEvent, DepthLevel};
+use kubera_models::IntegrityTier;
 
 /// REST depth snapshot response from Binance.
 #[derive(Debug, serde::Deserialize)]
@@ -47,12 +48,76 @@ enum BootstrapState {
     Ready { last_update_id: u64 },
 }
 
-/// Converts a price/qty string to scaled integer mantissa.
-/// Returns mantissa where value = mantissa * 10^exponent.
-fn parse_to_mantissa(s: &str, exponent: i8) -> Result<i64> {
-    let val: f64 = s.parse().with_context(|| format!("parse f64: {}", s))?;
-    let mantissa = (val / 10f64.powi(exponent as i32)).round() as i64;
-    Ok(mantissa)
+/// Pure string-to-mantissa parser (NO float conversion for determinism).
+///
+/// Parses decimal strings like "90000.12" directly to mantissa without
+/// intermediate f64 conversion, avoiding cross-platform float drift.
+///
+/// # Algorithm
+/// 1. Split on '.' to get integer and fractional parts
+/// 2. Count decimal places and scale appropriately
+/// 3. Return mantissa = value * 10^(-exponent)
+///
+/// # Examples
+/// - "90000.12" with exponent -2 → 9000012
+/// - "1.50000000" with exponent -8 → 150000000
+fn parse_to_mantissa_pure(s: &str, exponent: i8) -> Result<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("empty string");
+    }
+
+    // Handle negative numbers
+    let (is_negative, s) = if s.starts_with('-') {
+        (true, &s[1..])
+    } else {
+        (false, s)
+    };
+
+    // Split on decimal point
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() > 2 {
+        bail!("invalid decimal format: {}", s);
+    }
+
+    let int_part = parts[0];
+    let frac_part = if parts.len() == 2 { parts[1] } else { "" };
+
+    // Target decimal places = -exponent (e.g., exponent=-2 means 2 decimals)
+    let target_decimals = (-exponent) as usize;
+
+    // Build the mantissa string: integer part + fractional part padded/truncated
+    let mut mantissa_str = String::with_capacity(int_part.len() + target_decimals);
+    mantissa_str.push_str(int_part);
+
+    if frac_part.len() >= target_decimals {
+        // Truncate fractional part (with rounding check)
+        mantissa_str.push_str(&frac_part[..target_decimals]);
+
+        // Check if we need to round up (look at next digit if exists)
+        if frac_part.len() > target_decimals {
+            let next_digit = frac_part.chars().nth(target_decimals).unwrap_or('0');
+            if next_digit >= '5' {
+                // Parse, increment, return
+                let mut val: i64 = mantissa_str.parse()
+                    .with_context(|| format!("parse mantissa: {}", mantissa_str))?;
+                val += 1;
+                return Ok(if is_negative { -val } else { val });
+            }
+        }
+    } else {
+        // Pad fractional part with zeros
+        mantissa_str.push_str(frac_part);
+        for _ in 0..(target_decimals - frac_part.len()) {
+            mantissa_str.push('0');
+        }
+    }
+
+    // Parse the combined string as i64
+    let val: i64 = mantissa_str.parse()
+        .with_context(|| format!("parse mantissa: {}", mantissa_str))?;
+
+    Ok(if is_negative { -val } else { val })
 }
 
 /// Fetch REST depth snapshot for bootstrap.
@@ -80,6 +145,7 @@ async fn fetch_depth_snapshot(symbol: &str, limit: u32) -> Result<DepthSnapshot>
 }
 
 /// Convert REST snapshot to DepthEvent for initial state.
+/// Uses pure string-to-mantissa parsing for determinism.
 fn snapshot_to_depth_event(
     snapshot: &DepthSnapshot,
     symbol: &str,
@@ -90,8 +156,8 @@ fn snapshot_to_depth_event(
         .bids
         .iter()
         .filter_map(|[price_str, qty_str]| {
-            let price = parse_to_mantissa(price_str, price_exponent).ok()?;
-            let qty = parse_to_mantissa(qty_str, qty_exponent).ok()?;
+            let price = parse_to_mantissa_pure(price_str, price_exponent).ok()?;
+            let qty = parse_to_mantissa_pure(qty_str, qty_exponent).ok()?;
             Some(DepthLevel { price, qty })
         })
         .collect();
@@ -100,8 +166,8 @@ fn snapshot_to_depth_event(
         .asks
         .iter()
         .filter_map(|[price_str, qty_str]| {
-            let price = parse_to_mantissa(price_str, price_exponent).ok()?;
-            let qty = parse_to_mantissa(qty_str, qty_exponent).ok()?;
+            let price = parse_to_mantissa_pure(price_str, price_exponent).ok()?;
+            let qty = parse_to_mantissa_pure(qty_str, qty_exponent).ok()?;
             Some(DepthLevel { price, qty })
         })
         .collect();
@@ -117,10 +183,14 @@ fn snapshot_to_depth_event(
         bids,
         asks,
         is_snapshot: true,
+        integrity_tier: IntegrityTier::Certified,
+        source: Some("binance_sbe_depth_capture".to_string()),
     })
 }
 
 /// Convert SBE DepthUpdate to DepthEvent.
+/// Note: SBE decoder returns f64 from binary wire format - this is unavoidable.
+/// The f64→mantissa conversion here is deterministic since the binary source is fixed.
 fn sbe_depth_to_event(
     update: &DepthUpdate,
     symbol: &str,
@@ -128,6 +198,7 @@ fn sbe_depth_to_event(
     qty_exponent: i8,
 ) -> DepthEvent {
     // SBE decoder returns f64; we need to convert back to mantissa
+    // This is deterministic because the source is binary (not string parsing)
     let bids: Vec<DepthLevel> = update
         .bids
         .iter()
@@ -156,6 +227,8 @@ fn sbe_depth_to_event(
         bids,
         asks,
         is_snapshot: false,
+        integrity_tier: IntegrityTier::Certified,
+        source: Some("binance_sbe_depth_capture".to_string()),
     }
 }
 
@@ -387,14 +460,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_to_mantissa() {
+    fn test_parse_to_mantissa_pure() {
         // 90000.12 with exponent -2 = 9000012
-        let mantissa = parse_to_mantissa("90000.12", -2).unwrap();
+        let mantissa = parse_to_mantissa_pure("90000.12", -2).unwrap();
         assert_eq!(mantissa, 9000012);
 
         // 1.50000000 with exponent -8 = 150000000
-        let mantissa = parse_to_mantissa("1.50000000", -8).unwrap();
+        let mantissa = parse_to_mantissa_pure("1.50000000", -8).unwrap();
         assert_eq!(mantissa, 150000000);
+
+        // Test zero
+        let mantissa = parse_to_mantissa_pure("0.00000000", -8).unwrap();
+        assert_eq!(mantissa, 0);
+
+        // Test rounding up
+        let mantissa = parse_to_mantissa_pure("90000.125", -2).unwrap();
+        assert_eq!(mantissa, 9000013); // rounds up from .125 → .13
+
+        // Test rounding down
+        let mantissa = parse_to_mantissa_pure("90000.124", -2).unwrap();
+        assert_eq!(mantissa, 9000012); // rounds down from .124 → .12
+
+        // Test negative
+        let mantissa = parse_to_mantissa_pure("-100.50", -2).unwrap();
+        assert_eq!(mantissa, -10050);
     }
 
     #[test]
@@ -414,6 +503,8 @@ mod tests {
         assert_eq!(event.first_update_id, 12345);
         assert_eq!(event.last_update_id, 12345);
         assert!(event.is_snapshot);
+        assert_eq!(event.integrity_tier, IntegrityTier::Certified);
+        assert_eq!(event.source, Some("binance_sbe_depth_capture".to_string()));
         assert_eq!(event.bids.len(), 1);
         assert_eq!(event.bids[0].price, 9000000); // 90000.00 * 10^2
         assert_eq!(event.bids[0].qty, 150000000); // 1.5 * 10^8

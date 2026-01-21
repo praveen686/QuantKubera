@@ -325,6 +325,11 @@ enum Commands {
         /// Hedge on failure (rollback neutralization)
         #[arg(long, default_value_t = true)]
         hedge_on_failure: bool,
+
+        /// Certified mode: reject NON_CERTIFIED depth data (JSON capture).
+        /// Use this for production backtests to ensure only SBE-captured data is used.
+        #[arg(long, default_value_t = false)]
+        certified: bool,
     },
 }
 
@@ -490,6 +495,7 @@ async fn async_main() -> anyhow::Result<()> {
                 adverse_bps,
                 stale_quote_ms,
                 hedge_on_failure,
+                certified,
             } => {
                 return kitesim_backtest::run_kitesim_backtest_cli(
                     kitesim_backtest::KiteSimCliConfig {
@@ -507,6 +513,7 @@ async fn async_main() -> anyhow::Result<()> {
                         adverse_bps,
                         stale_quote_ms,
                         hedge_on_failure,
+                        certified,
                     }
                 ).await;
             }
