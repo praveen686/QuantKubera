@@ -4,15 +4,15 @@
 //! - load replay events (JSONL of QuoteEvent)
 //! - load orders (JSON)
 //! - execute sequentially through MultiLegCoordinator
-//! - emit report.json
+//! - emit report.json, fills.jsonl, pnl.json
 
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
-use kubera_options::execution::{LegStatus, MultiLegOrder};
+use kubera_options::execution::{LegSide, LegStatus};
 use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLegCoordinator};
 use kubera_options::replay::{QuoteEvent, ReplayEvent, ReplayFeed};
 use kubera_options::report::{BacktestReport, FillMetrics};
@@ -21,6 +21,8 @@ use kubera_options::specs::SpecStore;
 use crate::order_io::OrderFile;
 
 pub struct KiteSimCliConfig {
+    pub venue: String,
+    pub qty_scale: u32,
     pub strategy_name: String,
     pub replay_path: String,
     pub orders_path: String,
@@ -77,8 +79,18 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
         reject_if_no_quote_after: Duration::milliseconds(cfg.stale_quote_ms),
     });
 
-    // Optional: attach SpecStore (can be populated by caller later)
-    let specs = SpecStore::new();
+    // Build SpecStore with venue-specific defaults
+    let mut specs = SpecStore::new();
+    if cfg.venue.to_lowercase() == "binance" {
+        // Minimal defaults for Binance Spot fixed-point quantities.
+        // tick_size here is a placeholder; you can refine per-symbol later.
+        let tick = 0.01_f64;
+        for o in order_file.orders.iter() {
+            for leg in o.legs.iter() {
+                specs.insert_with_scale(&leg.tradingsymbol, 1, tick, cfg.qty_scale);
+            }
+        }
+    }
     sim = sim.with_specs(specs);
 
     let policy = AtomicExecPolicy {
@@ -118,16 +130,64 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
         slippage_bps_p99: quantile(&stats.slippage_samples_bps, 0.99),
     };
 
+    let venue_label = if cfg.venue.to_lowercase() == "binance" {
+        "Binance-Spot-Sim"
+    } else {
+        "NSE-Zerodha-Sim"
+    };
+
     let mut report = BacktestReport::default();
     report.created_at = Utc::now();
     report.engine = "KiteSim".to_string();
-    report.venue = "NSE-Zerodha-Sim".to_string();
+    report.venue = venue_label.to_string();
     report.dataset = replay_path.to_string_lossy().to_string();
     report.fill = fill;
     report.notes.push(format!("strategy={}", strategy_name));
     report.notes.push(format!("orders_file={}", orders_path.to_string_lossy()));
+    report.notes.push(format!("venue={}", cfg.venue));
+    report.notes.push(format!("qty_scale={}", cfg.qty_scale));
 
+    std::fs::create_dir_all(out_dir)?;
     report.write_json(out_dir)?;
+
+    // Execution traces: one MultiLegResult per line (JSONL)
+    let mut fills_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(out_dir.join("fills.jsonl"))?;
+    for r in &all_results {
+        let line = serde_json::to_string(r)?;
+        writeln!(fills_file, "{}", line)?;
+    }
+
+    // Simple PnL: only meaningful for Binance Spot smoke tests (single symbol, USDT quote).
+    if cfg.venue.to_lowercase() == "binance" {
+        let mut per_symbol = std::collections::HashMap::<String, f64>::new();
+        let scale = (cfg.qty_scale as f64).max(1.0);
+        for (order, res) in order_file.orders.iter().zip(all_results.iter()) {
+            for (leg, leg_res) in order.legs.iter().zip(res.leg_results.iter()) {
+                if leg_res.status != LegStatus::Filled {
+                    continue;
+                }
+                let px = leg_res.fill_price.unwrap_or(0.0);
+                let qty = (leg_res.filled_qty as f64) / scale;
+                let signed = match leg.side {
+                    LegSide::Buy => -1.0,
+                    LegSide::Sell => 1.0,
+                };
+                *per_symbol.entry(leg.tradingsymbol.clone()).or_insert(0.0) += signed * qty * px;
+            }
+        }
+        let total: f64 = per_symbol.values().sum();
+        let pnl = serde_json::json!({
+            "venue": cfg.venue,
+            "qty_scale": cfg.qty_scale,
+            "per_symbol_quote_pnl": per_symbol,
+            "total_quote_pnl": total
+        });
+        std::fs::write(out_dir.join("pnl.json"), serde_json::to_string_pretty(&pnl)?)?;
+    }
 
     println!("KiteSim backtest complete. Report written to: {}/report.json", out_dir.display());
     Ok(())

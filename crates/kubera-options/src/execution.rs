@@ -53,7 +53,7 @@ pub enum LegOrderType {
 }
 
 /// Aggregate result status after attempting a multi-leg execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiLegResult {
     pub strategy_name: String,
     pub leg_results: Vec<LegExecutionResult>,
@@ -63,17 +63,19 @@ pub struct MultiLegResult {
 }
 
 /// Individual outcome for a single strategy leg.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegExecutionResult {
     pub tradingsymbol: String,
     pub order_id: Option<String>,
     pub status: LegStatus,
+    /// Filled quantity in internal units (before qty_scale conversion).
+    pub filled_qty: u32,
     pub fill_price: Option<f64>,
     pub error: Option<String>,
 }
 
 /// Lifecycle state of an individual leg order.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum LegStatus {
     Pending,
     Placed,
@@ -285,7 +287,8 @@ impl MultiLegExecutor {
                     tradingsymbol: leg.tradingsymbol.clone(),
                     order_id: Some(format!("DRY_RUN_{}", i)),
                     status: LegStatus::Filled,
-                    fill_price: leg.price.or(Some(100.0)), 
+                    filled_qty: leg.quantity,
+                    fill_price: leg.price.or(Some(100.0)),
                     error: None,
                 });
                 continue;
@@ -334,6 +337,7 @@ impl MultiLegExecutor {
                         tradingsymbol: leg.tradingsymbol.clone(),
                         order_id: Some(order_id),
                         status: final_status,
+                        filled_qty,
                         fill_price: final_fill_price,
                         error: final_error,
                     });
@@ -349,6 +353,7 @@ impl MultiLegExecutor {
                         tradingsymbol: leg.tradingsymbol.clone(),
                         order_id: None,
                         status: LegStatus::Rejected,
+                        filled_qty: 0,
                         fill_price: None,
                         error: Some(e.to_string()),
                     });

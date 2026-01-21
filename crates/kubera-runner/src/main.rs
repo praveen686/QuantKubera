@@ -220,6 +220,14 @@ enum Commands {
 
     /// Offline KiteSim backtest runner (Mode B/C).
     BacktestKitesim {
+        /// Venue selector: auto, binance, zerodha
+        #[arg(long, default_value = "auto")]
+        venue: String,
+
+        /// Fixed-point quantity scale (for Binance Spot: 1_000_000 = micro-units)
+        #[arg(long, default_value_t = 1_000_000)]
+        qty_scale: u32,
+
         /// Strategy label (for report metadata only). If empty, uses orders file.
         #[arg(long, default_value = "")]
         strategy: String,
@@ -371,6 +379,8 @@ async fn async_main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Commands::BacktestKitesim {
+                venue,
+                qty_scale,
                 strategy,
                 replay,
                 orders,
@@ -384,6 +394,8 @@ async fn async_main() -> anyhow::Result<()> {
             } => {
                 return kitesim_backtest::run_kitesim_backtest_cli(
                     kitesim_backtest::KiteSimCliConfig {
+                        venue,
+                        qty_scale,
                         strategy_name: strategy,
                         replay_path: replay,
                         orders_path: orders,

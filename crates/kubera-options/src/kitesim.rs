@@ -189,6 +189,7 @@ impl KiteSim {
             tradingsymbol: o.tradingsymbol.clone(),
             order_id: Some(order_id.to_string()),
             status: o.status,
+            filled_qty: o.filled_qty,
             fill_price: o.avg_price,
             error: None,
         })
@@ -467,6 +468,7 @@ impl<'a> MultiLegCoordinator<'a> {
                         tradingsymbol: leg.tradingsymbol.clone(),
                         order_id: Some(oid.clone()),
                         status: st,
+                        filled_qty: filled,
                         fill_price: avg,
                         error: None,
                     });
@@ -479,6 +481,7 @@ impl<'a> MultiLegCoordinator<'a> {
                         tradingsymbol: leg.tradingsymbol.clone(),
                         order_id: Some(oid.clone()),
                         status: st,
+                        filled_qty: filled,
                         fill_price: avg,
                         error: Some(format!("partial fill: {}/{}", filled, qty)),
                     });
