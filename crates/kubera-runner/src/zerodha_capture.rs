@@ -367,9 +367,9 @@ pub async fn capture_zerodha_quotes(
                     for tick in ticks {
                         if let Some(symbol) = token_to_symbol.get(&tick.token) {
                             let integrity = if tick.is_synthetic {
-                                QuoteIntegrity::SyntheticFallback
+                                QuoteIntegrity::QuoteGradeL1
                             } else {
-                                QuoteIntegrity::RealDepth
+                                QuoteIntegrity::QuoteGradeD5
                             };
 
                             let event = QuoteEvent {

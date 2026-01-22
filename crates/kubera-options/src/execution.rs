@@ -37,7 +37,7 @@ pub struct LegOrder {
 }
 
 /// Direction of the leg execution.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LegSide {
     Buy,
     Sell,

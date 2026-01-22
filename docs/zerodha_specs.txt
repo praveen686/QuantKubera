@@ -1,0 +1,663 @@
+Below is a world-class spec for turning QuantKubera + Zerodha into an options + LOB–based system that supports paper trading and backtesting seamlessly in this phase, and produces final metrics through vectorbtpro.
+
+This spec assumes Binance Phase-2A remains the reference gold standard, and Zerodha is quote-grade depth-5 with explicit integrity constraints.
+
+QuantKubera Z-Phase: World-Class Options + LOB Spine
+Scope of this phase
+
+Deliver a production-quality system that can:
+
+Capture Zerodha live market data (options + futures), including depth-5.
+
+Persist an auditable event log and support deterministic replay.
+
+Maintain a single authoritative QuoteBook/Depth5Book per instrument.
+
+Run backtests and paper trading using the same execution engine (“one spine”).
+
+Compute options-specific PnL / risk / ledger (premium, MTM, expiry logic is next phase but ledger must exist now).
+
+Export vectorbtpro-ready time series and trade logs and compute final metrics there.
+
+This phase explicitly excludes: exchange-grade full L2 reconstruction, advanced margin modeling, settlement workflows, multi-broker.
+
+1) Non-Negotiable Principles (Carried from Binance)
+1.1 Separation of concerns
+
+Transport (Zerodha WS) ≠ Event Log (jsonl/parquet) ≠ Replay ≠ Execution ≠ Metrics
+
+You must be able to swap any layer without touching the others.
+
+1.2 Integrity tiering is mandatory
+
+Zerodha cannot be “CERTIFIED_L2”. So we formalize tiers:
+
+CERTIFIED_L2 (Binance SBE only)
+
+QUOTE_GRADE_D5 (Zerodha FULL mode: depth-5)
+
+QUOTE_GRADE_L1 (LTP+best only fallback; must be explicit)
+
+NON_CERTIFIED_TRANSFORMED (post-processed datasets; explicitly watermarked)
+
+Every event must carry:
+
+source
+
+integrity_tier
+
+is_synthetic
+
+dataset_id (hash)
+
+1.3 Determinism beats realism
+
+For Zerodha:
+
+Determinism means: same input file ⇒ identical fills & PnL
+
+Not “exchange-causal determinism”. This is documented.
+
+1.4 No silent degradation
+
+Any fallback (synthetic quantities, synthetic spread, missing depth) must:
+
+set is_synthetic=true
+
+degrade integrity tier
+
+be rejected if run is configured “strict”
+
+2) System Architecture (Zerodha Spine)
+2.1 Modules (high-level)
+
+Capture
+
+Zerodha WS ingest
+
+Universe discovery
+
+Event normalization to internal schema
+
+Event Log
+
+Append-only file log (jsonl now, parquet optional)
+
+Manifest + hashes
+
+Optional compression + chunking
+
+Replay
+
+Deterministic event iterator
+
+Time policy (wallclock / accelerated / fixed-step)
+
+Ordering rule and buffering
+
+Market State
+
+QuoteBook per instrument (Depth5Book)
+
+Derived mid, spread, microprice
+
+Staleness tracking
+
+Execution
+
+KiteSim execution model
+
+Unified for backtest and paper
+
+Order router + fill model + slippage
+
+Options Ledger
+
+Premium cashflows
+
+Position book
+
+Mark-to-market using mid or microprice
+
+Realistic lot sizing and tick size constraints
+
+Strategy Interface
+
+HYDRA intents → MultiLegOrder conversion
+
+Paper mode: send orders from strategy
+
+Backtest mode: same code path; only data feed differs
+
+Metrics
+
+Built-in “smoke metrics” (sanity)
+
+Export to vectorbtpro for “final metrics”
+
+3) Data Model: “Event-First” Contract
+3.1 Core event types
+QuoteEvent (Zerodha)
+
+Fields (minimum):
+
+event_id (monotonic within file)
+
+ts_exchange (if present; else null)
+
+ts_recv (capture receive time)
+
+ts_event (replay timestamp used by engine)
+
+source = ZERODHA_WS
+
+integrity_tier = QUOTE_GRADE_D5 | QUOTE_GRADE_L1 | NON_CERTIFIED_TRANSFORMED
+
+dataset_id (sha256 of manifest + chunk)
+
+symbol, instrument_token
+
+ltp
+
+bid[5], ask[5] each level: {price, qty}
+
+is_synthetic (true if any synthetic fill-in occurred)
+
+flags: bitfield (missing_depth, synthetic_qty, synthetic_spread, etc.)
+
+OrderEvent
+
+order accepted / rejected / partially filled / filled / canceled
+
+includes reason codes (stale quote, qty=0, etc.)
+
+FillEvent
+
+fill_price, fill_qty, fees, slippage_model, quote_snapshot_ref
+
+PositionEvent (optional)
+
+position delta updates (derived, but helpful for audits)
+
+3.2 Manifest contract
+
+Every dataset folder contains:
+
+manifest.json
+
+universe hash
+
+quotes file list with sha256
+
+time range
+
+integrity tier summary (counts)
+
+capture version (git commit)
+
+quotes_000001.jsonl (chunked)
+
+optionally orders.jsonl, fills.jsonl, report.json
+
+This makes runs auditable.
+
+4) Zerodha Capture: Make It “World-Class”
+4.1 Universe discovery (options)
+
+Deliver a deterministic universe builder that outputs:
+
+nearest weekly expiry
+
+ATM CE/PE ±N strikes
+
+optional futures for underlying reference
+
+Output: data/universe/<UNDERLYING>/<DATE>/universe.json
+
+Must include:
+
+lot_size, tick_size
+
+instrument_token
+
+strike, expiry, type (CE/PE/FUT)
+
+freeze_qty (for later phases; placeholder allowed now)
+
+4.2 Capture engine requirements
+
+WS reconnect with monotonic session_seq
+
+Raw message journaling optional
+
+Normalized QuoteEvent journaling mandatory
+
+No postprocessing inside capture except:
+
+convert to scaled ints / canonical decimal representation
+
+fill missing fields with explicit flags
+
+Critical: synthetic fallback policy
+
+If depth-5 missing:
+
+Allowed fallback: best bid/ask derived from LTP ± spread, but must set
+
+is_synthetic=true
+
+integrity_tier=QUOTE_GRADE_L1
+
+synthetic_qty must be nonzero and configurable
+
+record spread_policy used
+
+Default config:
+
+synthetic_qty = 150 (or lot_size * 10, but pinned for determinism)
+
+synthetic_spread_bps = 10 (0.1%)
+
+strict mode may reject synthetic events
+
+5) Replay Engine: Deterministic and Configurable
+5.1 Ordering rule (Zerodha)
+
+Sort key:
+
+ts_exchange if present else ts_recv
+
+ts_recv
+
+event_id
+
+5.2 Time policies
+
+REPLAY_WALLCLOCK: real-time pacing (paper mode)
+
+REPLAY_ACCELERATED: backtest as fast as possible (no sleeps)
+
+REPLAY_FIXED_STEP: step per quote or per N ms buckets
+
+5.3 Staleness gating
+
+Define “quote freshness” at execution time:
+
+max_quote_age_ms default 500ms–2000ms (config)
+
+if stale:
+
+reject market orders OR widen slippage dramatically
+
+must be explicit in logs
+
+6) LOB Model: Depth-5 Book (Authoritative, Single)
+
+We do not pretend full L2. We implement:
+
+Depth5Book per instrument
+
+update with each QuoteEvent
+
+derived:
+
+best_bid, best_ask, mid, microprice
+
+spread_bps, imbalance (top-1 or top-5)
+
+This is sufficient for:
+
+realistic execution simulation
+
+microstructure features
+
+options quoting sanity
+
+7) Execution Engine: One Spine for Backtest + Paper
+7.1 Unified Execution Contract
+
+Create a trait/interface:
+
+ExecutionVenue with:
+
+submit(order) -> ack/reject
+
+on_quote(quote) -> fills
+
+mark_positions(quote) -> mtm
+
+end_of_day() -> report
+
+Both modes implement it:
+
+KiteSimVenue (backtest)
+
+PaperVenue (paper trading, still simulated fills based on live quotes)
+
+Paper trading in this phase means:
+
+simulated fills (like KiteSim) but driven by live stream
+
+optionally “shadow” place real Zerodha orders later; out of scope now
+
+7.2 Fill model (world-class, quote-grade)
+
+For market orders:
+
+fill against best bid/ask
+
+apply:
+
+spread cost
+
+additional slippage function dependent on:
+
+top-of-book qty
+
+order qty (lot multiples)
+
+volatility proxy (spread widening)
+
+partial fills allowed if qty > visible_qty (configurable; default: partial)
+
+For limit orders:
+
+fill only if price crosses or equals
+
+can be “maker” fills with queue model simplified (world-class later)
+
+All fill decisions must reference:
+
+quote snapshot at time of fill
+
+staleness check outcome
+
+slippage model ID
+
+8) Options Ledger: Required Now (Even If Settlement Later)
+8.1 Position model
+
+Per instrument:
+
+net_qty (signed, lots)
+
+avg_price
+
+realized_pnl
+
+unrealized_pnl (mtm on mid/microprice)
+
+8.2 Cashflows
+
+Buying option: cash outflow premium
+
+Selling option: cash inflow premium
+
+Fees: placeholder model in this phase, but must exist as an interface
+
+8.3 Constraints enforced
+
+qty must be multiple of lot size
+
+price must conform to tick size
+
+freeze qty not enforced yet, but log warnings
+
+9) Strategy Integration and Evaluation (This Phase)
+
+You asked: “evaluate the strategies and make it work with changes.”
+
+In this phase, strategy evaluation must be plumbing-safe. The right approach:
+
+9.1 Strategy I/O contract
+
+Strategy reads:
+
+QuoteBook snapshots for each instrument
+
+derived features (mid, spread, imbalance)
+
+optional underlying reference (BANKNIFTY futures)
+
+Strategy emits:
+
+Vec<MultiLegOrder> (atomic multi-leg)
+
+Each leg: instrument, side, qty, order_type, limit_price (optional), time_in_force
+
+9.2 Multi-leg execution semantics
+
+Since Zerodha is quote-grade, implement:
+
+“atomic intent” but “non-atomic fill reality”
+
+support:
+
+sequential leg execution with hedge priority
+
+rollback policy if one leg fails (in KiteSim already conceptually supported)
+
+9.3 Minimum strategy set to validate system
+
+Do not jump to fancy alpha. Implement 3 canonical “plumbing validation” strategies:
+
+Cross-the-spread sanity
+
+Buy CE at market at time T, sell at T+Δ
+
+Expect negative PnL approx equal to spread+slippage
+
+This validates fills and ledger
+
+Straddle mid-reversion toy
+
+Buy ATM straddle when spread is tight and imbalance indicates liquidity
+
+Exit after small move or timeout
+
+Validates multi-leg + MTM
+
+Quote imbalance scalp
+
+Single-leg, enters only when top-5 imbalance threshold met
+
+Exit on mean reversion
+
+Validates LOB features & staleness gating
+
+These are not “profit strategies”; they validate the machine.
+
+9.4 Evaluation harness
+
+Every strategy must be scored with:
+
+fill rate
+
+average slippage
+
+reject reasons
+
+stale-quote count
+
+determinism checks
+
+PnL distribution
+
+turnover
+
+No strategy is “accepted” until execution metrics are sane.
+
+10) vectorbtpro Integration (Final Metrics)
+
+You want final backtest + paper metrics off vectorbtpro. The correct pattern is:
+
+10.1 Export two artifacts
+
+Market data frame
+
+per instrument time series:
+
+mid
+
+best bid/ask
+
+optionally microprice, spread, imbalance
+
+Trades / Orders / Fills
+
+a canonical fill ledger:
+
+timestamp
+
+instrument
+
+side
+
+qty
+
+price
+
+fees
+
+strategy_id
+
+order_id
+
+10.2 How vectorbtpro consumes it
+
+Two options (both valid):
+
+Option A: vectorbtpro Portfolio from orders/fills
+
+Use vectorbtpro’s portfolio constructors that accept order records
+
+This is closest to your simulator’s truth
+
+Option B: vectorbtpro signal-based backtest (secondary)
+
+Convert strategy outputs into entry/exit signals
+
+Less faithful for multi-leg options unless you custom model
+
+Recommendation: Option A is the “world-class” approach because it preserves fill realism.
+
+10.3 Unified metrics
+
+Compute in vectorbtpro:
+
+total return
+
+max drawdown
+
+Sharpe/Sortino
+
+win rate
+
+exposure
+
+turnover
+
+per-strategy attribution
+
+per-instrument attribution
+
+slippage/fee sensitivity (if you run replays with different parameters)
+
+11) Deliverables Checklist (What “Make it happen” Means)
+
+This phase is complete only when the following all exist and run end-to-end:
+
+Zerodha capture produces chunked quotes + manifest with hashes.
+
+Replay produces deterministic results (same dataset ⇒ identical report).
+
+KiteSim fills are nonzero and explainable with logs.
+
+Options ledger produces correct realized/unrealized PnL.
+
+HYDRA → MultiLegOrder path compiles and runs (even if strategy is simple).
+
+Export pipeline generates vectorbtpro-ready:
+
+market series
+
+fill ledger
+
+vectorbtpro notebook/script produces final metrics from exports.
+
+One command runs:
+
+capture (paper)
+
+replay (backtest)
+
+report generation
+
+export
+
+metrics
+
+12) Hard Changes You Must Make (No Negotiation)
+
+Based on your audit and the repo state issues, these are mandatory upgrades:
+
+Commit a reproducible dataset sample
+
+Small quotes sample + fills + report in repo
+or at minimum include hashes and a reproducible capture recipe.
+
+Add integrity fields into QuoteEvent
+
+integrity_tier, source, is_synthetic, dataset_id, flags
+
+Add a transformation tool
+
+Any postprocessing must be done by an explicit tool emitting a manifest
+
+Otherwise: reject transformed data in strict mode
+
+Make backtest reports include dataset hashes
+
+“certification” without hashes is not certification
+
+13) Strategy Evaluation: What I Would Do Immediately
+
+Given Zerodha limitations, the best “first profitable” research directions (after plumbing) are:
+
+Spread/impact-aware option microstructure: trade only when spread is narrow and depth imbalance supports your direction.
+
+Event-driven hedged structures: straddles/strangles with strict risk caps, using underlying futures as reference for regime.
+
+Volatility harvesting with execution gating: you do not “predict”; you “select moments” when execution friction is low.
+
+But: you must not chase these until the above deliverables are complete, because without a truthful execution model, strategy results are meaningless.
+
+14) Acceptance Criteria for “World-Class in This Phase”
+
+You can claim success when:
+
+A new developer can clone the repo, run:
+
+discover-zerodha
+
+capture-zerodha
+
+backtest-kitesim
+
+export-vectorbtpro
+
+vectorbtpro-metrics
+
+and obtain identical results (with the same dataset) with:
+
+explicit integrity tiering
+
+explicit fallbacks
+
+complete audit trail
+
+If you want, I can also provide (in the next message) a concrete “Spec-to-Repo Contract”: exact file paths, CLI commands, config schema, and the minimal Rust structs/interfaces you should implement so the system becomes mechanically enforceable.
+
+But as a spec, the above is the correct blueprint to make Zerodha + QuantKubera a world-class quote-grade options + LOB system for paper trading and backtesting with vectorbtpro metrics.
+
+

@@ -105,7 +105,7 @@ pub async fn capture_book_ticker_jsonl(symbol: &str, out_path: &Path, duration_s
             bid_qty: parse_u32_qty(&ev.bid_qty)?,
             ask_qty: parse_u32_qty(&ev.ask_qty)?,
             source: Some("BINANCE_BOOKTICKER".to_string()),
-            integrity: Some(QuoteIntegrity::RealDepth),
+            integrity: Some(QuoteIntegrity::QuoteGradeD5),
             is_synthetic: Some(false),
         };
 

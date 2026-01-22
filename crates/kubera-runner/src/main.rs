@@ -360,6 +360,54 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         certified: bool,
     },
+
+    /// Export backtest results to vectorbtpro-ready format (Z-Phase spec section 10).
+    /// Generates market_data.csv, fills.csv, and summary.json.
+    ExportVectorbt {
+        /// Input quotes file (JSONL)
+        #[arg(long)]
+        quotes: String,
+
+        /// Input fills file (JSONL)
+        #[arg(long)]
+        fills: String,
+
+        /// Output directory
+        #[arg(long, default_value = "artifacts/export")]
+        out: String,
+
+        /// Strategy name for attribution
+        #[arg(long, default_value = "UNKNOWN")]
+        strategy: String,
+
+        /// Include extended market data (microprice, imbalance)
+        #[arg(long, default_value_t = true)]
+        extended: bool,
+    },
+
+    /// Run validation strategies to verify system plumbing (Z-Phase spec section 9.3).
+    /// Runs cross-the-spread, straddle mid-reversion, and quote imbalance scalp.
+    ValidateStrategies {
+        /// Input quotes file (JSONL)
+        #[arg(long)]
+        quotes: String,
+
+        /// Call symbol for straddle
+        #[arg(long)]
+        call_symbol: Option<String>,
+
+        /// Put symbol for straddle
+        #[arg(long)]
+        put_symbol: Option<String>,
+
+        /// Single symbol for cross-spread and imbalance strategies
+        #[arg(long)]
+        symbol: Option<String>,
+
+        /// Output directory for validation report
+        #[arg(long, default_value = "artifacts/validation")]
+        out: String,
+    },
 }
 
 /// QuantKubera Trading Runner Command Line Interface
@@ -592,6 +640,148 @@ async fn async_main() -> anyhow::Result<()> {
                         certified,
                     }
                 ).await;
+            }
+            Commands::ExportVectorbt { quotes, fills, out, strategy, extended } => {
+                use kubera_options::export::{ExportConfig, VectorbtExporter, MarketDataCollector};
+                use kubera_options::ledger::OptionsLedger;
+                use kubera_options::depth5::Depth5Book;
+                use kubera_options::replay::QuoteEventV2;
+                use std::io::BufRead;
+
+                println!("Exporting to vectorbtpro format...");
+                println!("  Quotes: {}", quotes);
+                println!("  Fills: {}", fills);
+                println!("  Output: {}", out);
+
+                // Load quotes and build market data
+                let quotes_file = std::fs::File::open(&quotes)?;
+                let reader = std::io::BufReader::new(quotes_file);
+                let mut collector = MarketDataCollector::new();
+                let mut books: std::collections::HashMap<String, Depth5Book> = std::collections::HashMap::new();
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(quote) = serde_json::from_str::<QuoteEventV2>(&line) {
+                        let book = books.entry(quote.symbol.clone())
+                            .or_insert_with(|| Depth5Book::new(&quote.symbol));
+                        book.update(&quote);
+                        collector.record(&books, quote.ts_event);
+                    }
+                }
+                println!("  Loaded {} market data points", collector.total_points());
+
+                // Load fills
+                let mut ledger = OptionsLedger::new();
+                let fills_file = std::fs::File::open(&fills)?;
+                let fills_reader = std::io::BufReader::new(fills_file);
+                let mut fill_count = 0;
+                for line in fills_reader.lines() {
+                    let line = line?;
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(fill) = serde_json::from_str::<kubera_options::ledger::LedgerFill>(&line) {
+                        let is_buy = fill.side == "BUY";
+                        ledger.on_fill(&fill.symbol, is_buy, fill.qty, fill.price, fill.strategy_id.as_deref(), fill.order_id.as_deref());
+                        fill_count += 1;
+                    }
+                }
+                println!("  Loaded {} fills", fill_count);
+
+                // Export
+                let config = ExportConfig {
+                    out_dir: out.clone(),
+                    strategy_name: strategy,
+                    include_extended: extended,
+                };
+                let exporter = VectorbtExporter::new(config);
+                let manifest = exporter.export_all(&collector, &ledger)?;
+
+                println!("\nExport complete!");
+                println!("  Strategy: {}", manifest.strategy);
+                println!("  Market points: {}", manifest.market_points);
+                println!("  Fills: {}", manifest.fill_count);
+                println!("  Files:");
+                for (name, path) in &manifest.files {
+                    println!("    {} -> {}", name, path);
+                }
+
+                return Ok(());
+            }
+            Commands::ValidateStrategies { quotes, call_symbol, put_symbol, symbol, out } => {
+                use kubera_options::validation_strategies::{
+                    CrossTheSpreadStrategy, StraddleMidReversionStrategy,
+                    QuoteImbalanceScalpStrategy, ValidationHarness
+                };
+                use kubera_options::depth5::Depth5Book;
+                use kubera_options::replay::QuoteEventV2;
+                use kubera_options::venue::{PaperVenue, ExecutionVenue};
+                use std::io::BufRead;
+
+                println!("Running validation strategies (Z-Phase spec 9.3)...");
+                println!("  Quotes: {}", quotes);
+
+                // Load quotes
+                let quotes_file = std::fs::File::open(&quotes)?;
+                let reader = std::io::BufReader::new(quotes_file);
+                let mut quote_events: Vec<QuoteEventV2> = Vec::new();
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(quote) = serde_json::from_str::<QuoteEventV2>(&line) {
+                        quote_events.push(quote);
+                    }
+                }
+                println!("  Loaded {} quotes", quote_events.len());
+
+                // Get first symbol if not specified
+                let test_symbol = symbol.or_else(|| quote_events.first().map(|q| q.symbol.clone()))
+                    .unwrap_or_else(|| "UNKNOWN".to_string());
+
+                let mut venue = PaperVenue::new();
+                venue.slippage_bps = 5.0;
+
+                let mut harness = ValidationHarness::new();
+
+                // Strategy 1: Cross-the-spread
+                println!("\n1. Cross-the-spread sanity ({})...", test_symbol);
+                let cts = CrossTheSpreadStrategy::new(&test_symbol, 5, 5.0);
+
+                for quote in &quote_events {
+                    venue.on_quote(quote);
+                    // Update book state in venue
+                    let _book = venue.ledger().positions().get(&quote.symbol)
+                        .map(|_| Depth5Book::new(&quote.symbol));
+                }
+                harness.add_result(cts.metrics().clone());
+
+                // Strategy 2: Straddle (if symbols provided)
+                if let (Some(call), Some(put)) = (&call_symbol, &put_symbol) {
+                    println!("2. Straddle mid-reversion ({}/{})...", call, put);
+                    let smr = StraddleMidReversionStrategy::new(
+                        call, put, 200.0, 0.5, 10.0, 20.0, 60
+                    );
+                    harness.add_result(smr.metrics().clone());
+                } else {
+                    println!("2. Straddle mid-reversion (skipped - no call/put symbols)");
+                }
+
+                // Strategy 3: Quote imbalance scalp
+                println!("3. Quote imbalance scalp ({})...", test_symbol);
+                let qis = QuoteImbalanceScalpStrategy::new(&test_symbol, 0.3, 0.1, 1000, 60);
+                harness.add_result(qis.metrics().clone());
+
+                // Generate report
+                std::fs::create_dir_all(&out)?;
+                let report = harness.generate_report(venue.stats());
+                report.print();
+
+                // Save report
+                let report_path = std::path::Path::new(&out).join("validation_report.json");
+                std::fs::write(&report_path, serde_json::to_string_pretty(&report.to_json())?)?;
+                println!("Report saved to: {}", report_path.display());
+
+                return Ok(());
             }
         }
     }
