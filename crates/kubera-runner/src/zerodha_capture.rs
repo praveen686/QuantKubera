@@ -1,7 +1,7 @@
-//! Zerodha Quote Capture → QuoteEvent JSONL for KiteSim Replay.
+//! Zerodha Quote Capture → QuoteEventV2 JSONL for Z-Phase Pipeline.
 //!
 //! Captures real-time quotes from Zerodha Kite WebSocket and writes
-//! to JSONL format compatible with KiteSim backtest runner.
+//! to QuoteEventV2 JSONL format compatible with the Z-Phase spine.
 //!
 //! ## Usage
 //! ```bash
@@ -14,6 +14,14 @@
 //! ## Prerequisites
 //! - Zerodha credentials in `.env` (ZERODHA_USER_ID, ZERODHA_PASSWORD, etc.)
 //! - Python sidecar for TOTP authentication
+//!
+//! ## Output Format
+//! Emits QuoteEventV2 with:
+//! - event_id: monotonic counter
+//! - ts_recv/ts_event: capture timestamp
+//! - bids[5]/asks[5]: full depth-5 arrays
+//! - integrity_tier: QuoteGradeD5 (real depth) or QuoteGradeL1 (synthetic)
+//! - flags: detailed audit trail
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -21,12 +29,16 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::tungstenite::Message;
 use byteorder::{BigEndian, ByteOrder};
 use serde::Deserialize;
 
-use kubera_options::replay::{QuoteEvent, QuoteIntegrity};
+use kubera_options::replay::{QuoteEventV2, QuoteIntegrity, QuoteFlags, DepthLevelF64};
+
+/// Global event ID counter for monotonic ordering.
+static EVENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const KITE_API_URL: &str = "https://api.kite.trade";
 
@@ -116,20 +128,22 @@ async fn fetch_instrument_tokens(
     Ok(tokens)
 }
 
-/// Parsed tick data with integrity watermark.
-/// Returns (token, best_bid, best_ask, bid_qty, ask_qty, is_synthetic).
+/// Parsed tick data with full depth-5 and integrity watermark.
 struct ParsedTick {
     token: u32,
-    bid: f64,
-    ask: f64,
-    bid_qty: u32,
-    ask_qty: u32,
-    /// True if bid/ask/qty are synthetic (LTP fallback)
+    ltp: f64,
+    /// Full depth-5 bid levels (index 0 = best bid).
+    bids: Vec<DepthLevelF64>,
+    /// Full depth-5 ask levels (index 0 = best ask).
+    asks: Vec<DepthLevelF64>,
+    /// True if bid/ask/qty are synthetic (LTP fallback).
     is_synthetic: bool,
+    /// Detailed flags for audit trail.
+    flags: QuoteFlags,
 }
 
 /// Parse binary tick data from Kite WebSocket.
-/// Returns parsed ticks with integrity watermarks.
+/// Returns parsed ticks with full depth-5 and integrity watermarks.
 ///
 /// Kite Binary Format (Full mode - 184 bytes):
 /// - Offset 0-4: Token (uint32)
@@ -176,63 +190,68 @@ fn parse_tick(data: &[u8]) -> Option<Vec<ParsedTick>> {
         let ltp = BigEndian::read_i32(&packet[4..8]) as f64 / 100.0;
 
         // Full mode (184 bytes) has depth data
+        // Per Kite docs: bytes 64-124 = bid depth (5 levels), bytes 124-184 = ask depth (5 levels)
         if packet_len >= 184 {
-            let depth_start = 44;
+            let depth_start = 64;
 
-            // Find best bid (highest price with qty > 0 from buy side)
-            let mut best_bid_price = 0.0;
-            let mut best_bid_qty = 0u32;
+            // Extract full depth-5 bid levels
+            let mut bids: Vec<DepthLevelF64> = Vec::with_capacity(5);
             for i in 0..5 {
                 let level_offset = depth_start + (i * 12);
                 let qty = BigEndian::read_i32(&packet[level_offset..level_offset + 4]);
                 let price = BigEndian::read_i32(&packet[level_offset + 4..level_offset + 8]) as f64 / 100.0;
-                if qty > 0 && price > 0.0 && price > best_bid_price {
-                    best_bid_price = price;
-                    best_bid_qty = qty as u32;
+                if qty > 0 && price > 0.0 {
+                    bids.push(DepthLevelF64 { price, qty: qty as u32 });
                 }
             }
+            // Sort bids descending by price (best bid first)
+            bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Find best ask (lowest price with qty > 0 from sell side)
-            let mut best_ask_price = f64::MAX;
-            let mut best_ask_qty = 0u32;
+            // Extract full depth-5 ask levels
+            let mut asks: Vec<DepthLevelF64> = Vec::with_capacity(5);
             for i in 0..5 {
                 let level_offset = depth_start + 60 + (i * 12);
                 let qty = BigEndian::read_i32(&packet[level_offset..level_offset + 4]);
                 let price = BigEndian::read_i32(&packet[level_offset + 4..level_offset + 8]) as f64 / 100.0;
-                if qty > 0 && price > 0.0 && price < best_ask_price {
-                    best_ask_price = price;
-                    best_ask_qty = qty as u32;
+                if qty > 0 && price > 0.0 {
+                    asks.push(DepthLevelF64 { price, qty: qty as u32 });
                 }
             }
+            // Sort asks ascending by price (best ask first)
+            asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
 
-            // Validate: bid < ask and both are reasonable (within 50% of LTP)
-            let valid_depth = best_bid_price > 0.0
-                && best_ask_price < f64::MAX
-                && best_bid_price < best_ask_price
-                && best_bid_price > ltp * 0.5
-                && best_ask_price < ltp * 1.5;
+            // Validate: best bid < best ask and both are reasonable
+            let valid_depth = !bids.is_empty()
+                && !asks.is_empty()
+                && bids[0].price < asks[0].price
+                && bids[0].price > ltp * 0.5
+                && asks[0].price < ltp * 1.5;
 
             if valid_depth {
                 ticks.push(ParsedTick {
                     token,
-                    bid: best_bid_price,
-                    ask: best_ask_price,
-                    bid_qty: best_bid_qty,
-                    ask_qty: best_ask_qty,
+                    ltp,
+                    bids,
+                    asks,
                     is_synthetic: false,
+                    flags: QuoteFlags::default(),
                 });
             } else if ltp > 0.0 {
                 // Fallback: use LTP with synthetic spread (0.1%) and synthetic quantity
-                // Use 150 as synthetic qty (~10 lots for BANKNIFTY options)
                 let spread = ltp * 0.001;
                 let synthetic_qty = 150u32;
                 ticks.push(ParsedTick {
                     token,
-                    bid: ltp - spread,
-                    ask: ltp + spread,
-                    bid_qty: synthetic_qty,
-                    ask_qty: synthetic_qty,
+                    ltp,
+                    bids: vec![DepthLevelF64 { price: ltp - spread, qty: synthetic_qty }],
+                    asks: vec![DepthLevelF64 { price: ltp + spread, qty: synthetic_qty }],
                     is_synthetic: true,
+                    flags: QuoteFlags {
+                        missing_depth: true,
+                        synthetic_qty: true,
+                        synthetic_spread: true,
+                        stale: false,
+                    },
                 });
             }
         } else if packet_len >= 44 {
@@ -242,11 +261,16 @@ fn parse_tick(data: &[u8]) -> Option<Vec<ParsedTick>> {
                 let synthetic_qty = 150u32;
                 ticks.push(ParsedTick {
                     token,
-                    bid: ltp - spread,
-                    ask: ltp + spread,
-                    bid_qty: synthetic_qty,
-                    ask_qty: synthetic_qty,
+                    ltp,
+                    bids: vec![DepthLevelF64 { price: ltp - spread, qty: synthetic_qty }],
+                    asks: vec![DepthLevelF64 { price: ltp + spread, qty: synthetic_qty }],
                     is_synthetic: true,
+                    flags: QuoteFlags {
+                        missing_depth: true,
+                        synthetic_qty: true,
+                        synthetic_spread: true,
+                        stale: false,
+                    },
                 });
             }
         } else if packet_len >= 8 {
@@ -256,11 +280,16 @@ fn parse_tick(data: &[u8]) -> Option<Vec<ParsedTick>> {
                 let synthetic_qty = 150u32;
                 ticks.push(ParsedTick {
                     token,
-                    bid: ltp - spread,
-                    ask: ltp + spread,
-                    bid_qty: synthetic_qty,
-                    ask_qty: synthetic_qty,
+                    ltp,
+                    bids: vec![DepthLevelF64 { price: ltp - spread, qty: synthetic_qty }],
+                    asks: vec![DepthLevelF64 { price: ltp + spread, qty: synthetic_qty }],
                     is_synthetic: true,
+                    flags: QuoteFlags {
+                        missing_depth: true,
+                        synthetic_qty: true,
+                        synthetic_spread: true,
+                        stale: false,
+                    },
                 });
             }
         }
@@ -364,6 +393,7 @@ pub async fn capture_zerodha_quotes(
         match item {
             Message::Binary(data) => {
                 if let Some(ticks) = parse_tick(&data) {
+                    let now = Utc::now();
                     for tick in ticks {
                         if let Some(symbol) = token_to_symbol.get(&tick.token) {
                             let integrity = if tick.is_synthetic {
@@ -372,16 +402,21 @@ pub async fn capture_zerodha_quotes(
                                 QuoteIntegrity::QuoteGradeD5
                             };
 
-                            let event = QuoteEvent {
-                                ts: Utc::now(),
-                                tradingsymbol: symbol.clone(),
-                                bid: tick.bid,
-                                ask: tick.ask,
-                                bid_qty: tick.bid_qty,
-                                ask_qty: tick.ask_qty,
-                                source: Some("ZERODHA_WS".to_string()),
-                                integrity: Some(integrity),
-                                is_synthetic: Some(tick.is_synthetic),
+                            let event = QuoteEventV2 {
+                                event_id: EVENT_ID_COUNTER.fetch_add(1, Ordering::SeqCst),
+                                ts_exchange: None, // Zerodha doesn't provide exchange timestamp
+                                ts_recv: now,
+                                ts_event: now,
+                                source: "ZERODHA_WS".to_string(),
+                                integrity_tier: integrity,
+                                dataset_id: None,
+                                symbol: symbol.clone(),
+                                instrument_token: Some(tick.token),
+                                ltp: tick.ltp,
+                                bids: tick.bids,
+                                asks: tick.asks,
+                                is_synthetic: tick.is_synthetic,
+                                flags: tick.flags,
                             };
 
                             let line = serde_json::to_string(&event)?;

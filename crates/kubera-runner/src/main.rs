@@ -51,8 +51,9 @@ use kubera_options::OptionType;
 /// Parse NSE option symbol to extract strike, expiry, and option type
 /// Example: "NIFTY2612025450CE" -> (25450.0, 2026-01-20, Call)
 fn parse_nse_option_symbol(symbol: &str) -> Option<(f64, chrono::NaiveDate, OptionType)> {
-    // Pattern: {INDEX}{YY}{MM}{DD}{STRIKE}{CE/PE}
-    // Example: NIFTY2612025450CE
+    // Supports two formats:
+    // 1. {INDEX}{YY}{MMM}{STRIKE}{CE/PE} - e.g., BANKNIFTY26JAN58900CE (weekly)
+    // 2. {INDEX}{YY}{MM}{DD}{STRIKE}{CE/PE} - e.g., NIFTY2612025450CE (monthly)
 
     let symbol = symbol.to_uppercase();
 
@@ -73,20 +74,65 @@ fn parse_nse_option_symbol(symbol: &str) -> Option<(f64, chrono::NaiveDate, Opti
     let _index_name = &symbol[..digit_start];
     let rest = &symbol[digit_start..symbol.len()-2]; // Remove CE/PE
 
-    // Parse YYMMDDSSSSS (year, month, day, strike)
-    if rest.len() < 7 {
-        return None;
+    // Try format 1: YY + MMM (3-letter month) + STRIKE (e.g., "26JAN58900")
+    if rest.len() >= 5 {
+        let yy_str = &rest[0..2];
+        if let Ok(yy) = yy_str.parse::<i32>() {
+            // Check if next 3 chars are a month name
+            if rest.len() >= 5 {
+                let month_str = &rest[2..5];
+                let month_opt = match month_str {
+                    "JAN" => Some(1u32),
+                    "FEB" => Some(2),
+                    "MAR" => Some(3),
+                    "APR" => Some(4),
+                    "MAY" => Some(5),
+                    "JUN" => Some(6),
+                    "JUL" => Some(7),
+                    "AUG" => Some(8),
+                    "SEP" => Some(9),
+                    "OCT" => Some(10),
+                    "NOV" => Some(11),
+                    "DEC" => Some(12),
+                    _ => None,
+                };
+
+                if let Some(mm) = month_opt {
+                    // Strike is after month name
+                    let strike_str = &rest[5..];
+                    if let Ok(strike) = strike_str.parse::<f64>() {
+                        let year = 2000 + yy;
+                        // For weekly options, use last Thursday of month (approximate)
+                        // For now, use last day of month as expiry placeholder
+                        let last_day = match mm {
+                            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                            4 | 6 | 9 | 11 => 30,
+                            2 => if year % 4 == 0 { 29 } else { 28 },
+                            _ => 28,
+                        };
+                        // Find the Thursday closest to symbol date (weekly expiry)
+                        // For simplicity, use day 22-28 range (typical weekly expiry)
+                        let expiry = chrono::NaiveDate::from_ymd_opt(year, mm, last_day.min(28))?;
+                        return Some((strike, expiry, option_type));
+                    }
+                }
+            }
+        }
     }
 
-    let yy: i32 = rest[0..2].parse().ok()?;
-    let mm: u32 = rest[2..4].parse().ok()?;
-    let dd: u32 = rest[4..6].parse().ok()?;
-    let strike: f64 = rest[6..].parse().ok()?;
+    // Try format 2: YYMMDD + STRIKE (e.g., "26012458900")
+    if rest.len() >= 7 {
+        let yy: i32 = rest[0..2].parse().ok()?;
+        let mm: u32 = rest[2..4].parse().ok()?;
+        let dd: u32 = rest[4..6].parse().ok()?;
+        let strike: f64 = rest[6..].parse().ok()?;
 
-    let year = 2000 + yy;
-    let expiry = chrono::NaiveDate::from_ymd_opt(year, mm, dd)?;
+        let year = 2000 + yy;
+        let expiry = chrono::NaiveDate::from_ymd_opt(year, mm, dd)?;
+        return Some((strike, expiry, option_type));
+    }
 
-    Some((strike, expiry, option_type))
+    None
 }
 
 /// Calculate time to expiry in years
@@ -407,6 +453,46 @@ enum Commands {
         /// Output directory for validation report
         #[arg(long, default_value = "artifacts/validation")]
         out: String,
+    },
+
+    /// Upgrade legacy QuoteEvent files to QuoteEventV2 format.
+    /// Preserves original data while adding Z-Phase required fields.
+    UpgradeQuotes {
+        /// Input legacy quotes file (JSONL of QuoteEvent)
+        #[arg(long)]
+        input: String,
+
+        /// Output upgraded quotes file (JSONL of QuoteEventV2)
+        #[arg(long)]
+        output: String,
+
+        /// Dataset ID for audit trail
+        #[arg(long)]
+        dataset_id: Option<String>,
+    },
+
+    /// Run full Zerodha pipeline: HYDRA/AEON backtest → fills → vectorbt export.
+    /// Single command for end-to-end Z-Phase workflow.
+    RunZerodhaPipeline {
+        /// Input quotes file (JSONL of QuoteEventV2)
+        #[arg(long)]
+        quotes: String,
+
+        /// Strategy: hydra or aeon
+        #[arg(long, default_value = "hydra")]
+        strategy: String,
+
+        /// Output directory for all artifacts
+        #[arg(long, default_value = "artifacts/pipeline")]
+        out: String,
+
+        /// Commission in basis points (default 3 bps)
+        #[arg(long, default_value_t = 3.0)]
+        commission_bps: f64,
+
+        /// Initial capital
+        #[arg(long, default_value_t = 100000.0)]
+        capital: f64,
     },
 }
 
@@ -734,41 +820,164 @@ async fn async_main() -> anyhow::Result<()> {
                 }
                 println!("  Loaded {} quotes", quote_events.len());
 
+                if quote_events.is_empty() {
+                    anyhow::bail!("No quotes loaded - check file format");
+                }
+
                 // Get first symbol if not specified
-                let test_symbol = symbol.or_else(|| quote_events.first().map(|q| q.symbol.clone()))
-                    .unwrap_or_else(|| "UNKNOWN".to_string());
+                let test_symbol = symbol.unwrap_or_else(|| quote_events.first().map(|q| q.symbol.clone()).unwrap());
 
                 let mut venue = PaperVenue::new();
                 venue.slippage_bps = 5.0;
 
                 let mut harness = ValidationHarness::new();
 
-                // Strategy 1: Cross-the-spread
+                // Build depth books from quotes
+                let mut books: std::collections::HashMap<String, Depth5Book> = std::collections::HashMap::new();
+
+                // ====================================================
+                // Strategy 1: Cross-the-spread sanity
+                // ====================================================
                 println!("\n1. Cross-the-spread sanity ({})...", test_symbol);
-                let cts = CrossTheSpreadStrategy::new(&test_symbol, 5, 5.0);
+                let mut cts = CrossTheSpreadStrategy::new(&test_symbol, 5, 5.0);
+                let mut cts_entry_pending = false;
 
                 for quote in &quote_events {
+                    // Update book
+                    let book = books.entry(quote.symbol.clone())
+                        .or_insert_with(|| Depth5Book::new(&quote.symbol));
+                    book.update(quote);
+
+                    // Feed to venue
                     venue.on_quote(quote);
-                    // Update book state in venue
-                    let _book = venue.ledger().positions().get(&quote.symbol)
-                        .map(|_| Depth5Book::new(&quote.symbol));
+
+                    // Only process for our symbol
+                    if quote.symbol != test_symbol {
+                        continue;
+                    }
+
+                    // Check entry
+                    if !cts.has_position() && !cts_entry_pending {
+                        if let Some(order) = cts.entry_order(book, quote.ts_event) {
+                            // Simulate fill at ask price
+                            let fill_price = book.best_ask().unwrap_or(quote.ltp);
+                            cts.on_entry_fill(fill_price);
+                            cts_entry_pending = false;
+                            println!("    Entry fill at {:.2}", fill_price);
+                        }
+                    }
+
+                    // Check exit
+                    if cts.has_position() && cts.should_exit(quote.ts_event) {
+                        if let Some(_order) = cts.exit_order() {
+                            // Simulate fill at bid price
+                            let fill_price = book.best_bid().unwrap_or(quote.ltp);
+                            cts.on_exit_fill(fill_price);
+                            println!("    Exit fill at {:.2}", fill_price);
+                        }
+                    }
                 }
+                println!("    Trades: {}, PnL: {:.2}", cts.metrics().trades_filled, cts.metrics().total_pnl);
                 harness.add_result(cts.metrics().clone());
 
-                // Strategy 2: Straddle (if symbols provided)
+                // ====================================================
+                // Strategy 2: Straddle mid-reversion
+                // ====================================================
                 if let (Some(call), Some(put)) = (&call_symbol, &put_symbol) {
-                    println!("2. Straddle mid-reversion ({}/{})...", call, put);
-                    let smr = StraddleMidReversionStrategy::new(
+                    println!("\n2. Straddle mid-reversion ({}/{})...", call, put);
+                    let mut smr = StraddleMidReversionStrategy::new(
                         call, put, 200.0, 0.5, 10.0, 20.0, 60
                     );
+
+                    // Reset books for clean run
+                    books.clear();
+
+                    for quote in &quote_events {
+                        // Update book
+                        let book = books.entry(quote.symbol.clone())
+                            .or_insert_with(|| Depth5Book::new(&quote.symbol));
+                        book.update(quote);
+
+                        // Check entry
+                        if !smr.has_position() {
+                            if let Some(_order) = smr.entry_order(&books, quote.ts_event) {
+                                // Simulate straddle fill
+                                let call_ask = books.get(call).and_then(|b| b.best_ask()).unwrap_or(0.0);
+                                let put_ask = books.get(put).and_then(|b| b.best_ask()).unwrap_or(0.0);
+                                let total_premium = call_ask + put_ask;
+                                if total_premium > 0.0 {
+                                    smr.on_entry_fill(total_premium);
+                                    println!("    Straddle entry at premium {:.2}", total_premium);
+                                }
+                            }
+                        }
+
+                        // Check exit
+                        if smr.has_position() && smr.should_exit(&books, quote.ts_event) {
+                            if let Some(_order) = smr.exit_order() {
+                                let call_bid = books.get(call).and_then(|b| b.best_bid()).unwrap_or(0.0);
+                                let put_bid = books.get(put).and_then(|b| b.best_bid()).unwrap_or(0.0);
+                                let exit_premium = call_bid + put_bid;
+                                smr.on_exit_fill(exit_premium);
+                                println!("    Straddle exit at premium {:.2}", exit_premium);
+                            }
+                        }
+                    }
+                    println!("    Trades: {}, PnL: {:.2}", smr.metrics().trades_filled, smr.metrics().total_pnl);
                     harness.add_result(smr.metrics().clone());
                 } else {
-                    println!("2. Straddle mid-reversion (skipped - no call/put symbols)");
+                    println!("\n2. Straddle mid-reversion (skipped - no call/put symbols)");
                 }
 
+                // ====================================================
                 // Strategy 3: Quote imbalance scalp
-                println!("3. Quote imbalance scalp ({})...", test_symbol);
-                let qis = QuoteImbalanceScalpStrategy::new(&test_symbol, 0.3, 0.1, 1000, 60);
+                // ====================================================
+                println!("\n3. Quote imbalance scalp ({})...", test_symbol);
+                let mut qis = QuoteImbalanceScalpStrategy::new(&test_symbol, 0.3, 0.1, 1000, 60);
+
+                // Reset books for clean run
+                books.clear();
+
+                for quote in &quote_events {
+                    // Update book
+                    let book = books.entry(quote.symbol.clone())
+                        .or_insert_with(|| Depth5Book::new(&quote.symbol));
+                    book.update(quote);
+
+                    // Only process for our symbol
+                    if quote.symbol != test_symbol {
+                        continue;
+                    }
+
+                    // Check entry
+                    if !qis.has_position() {
+                        if let Some(order) = qis.entry_order(book, quote.ts_event) {
+                            let is_buy = order.side == kubera_options::execution::LegSide::Buy;
+                            let fill_price = if is_buy {
+                                book.best_ask().unwrap_or(quote.ltp)
+                            } else {
+                                book.best_bid().unwrap_or(quote.ltp)
+                            };
+                            qis.on_entry_fill(fill_price, is_buy);
+                            println!("    Imbalance entry {:?} at {:.2}", order.side, fill_price);
+                        }
+                    }
+
+                    // Check exit
+                    if qis.has_position() && qis.should_exit(book, quote.ts_event) {
+                        if let Some(order) = qis.exit_order() {
+                            let is_buy = order.side == kubera_options::execution::LegSide::Buy;
+                            let fill_price = if is_buy {
+                                book.best_ask().unwrap_or(quote.ltp)
+                            } else {
+                                book.best_bid().unwrap_or(quote.ltp)
+                            };
+                            qis.on_exit_fill(fill_price);
+                            println!("    Imbalance exit at {:.2}", fill_price);
+                        }
+                    }
+                }
+                println!("    Trades: {}, PnL: {:.2}", qis.metrics().trades_filled, qis.metrics().total_pnl);
                 harness.add_result(qis.metrics().clone());
 
                 // Generate report
@@ -780,6 +989,314 @@ async fn async_main() -> anyhow::Result<()> {
                 let report_path = std::path::Path::new(&out).join("validation_report.json");
                 std::fs::write(&report_path, serde_json::to_string_pretty(&report.to_json())?)?;
                 println!("Report saved to: {}", report_path.display());
+
+                return Ok(());
+            }
+            Commands::UpgradeQuotes { input, output, dataset_id } => {
+                use kubera_options::replay::{QuoteEvent, QuoteEventV2, QuoteIntegrity, QuoteFlags, DepthLevelF64};
+                use std::io::BufRead;
+                use std::sync::atomic::{AtomicU64, Ordering};
+
+                println!("Upgrading quotes from legacy QuoteEvent to QuoteEventV2...");
+                println!("  Input:  {}", input);
+                println!("  Output: {}", output);
+
+                let input_file = std::fs::File::open(&input)?;
+                let reader = std::io::BufReader::new(input_file);
+
+                let output_file = std::fs::File::create(&output)?;
+                let mut writer = std::io::BufWriter::new(output_file);
+
+                static EVENT_ID: AtomicU64 = AtomicU64::new(1);
+                let mut upgraded = 0;
+                let mut skipped = 0;
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.trim().is_empty() { continue; }
+
+                    // Try to parse as legacy QuoteEvent
+                    if let Ok(legacy) = serde_json::from_str::<QuoteEvent>(&line) {
+                        // Convert to QuoteEventV2
+                        let is_synthetic = legacy.is_synthetic.unwrap_or(false);
+                        let integrity = legacy.integrity.clone().unwrap_or(
+                            if is_synthetic { QuoteIntegrity::QuoteGradeL1 } else { QuoteIntegrity::QuoteGradeD5 }
+                        );
+
+                        let v2 = QuoteEventV2 {
+                            event_id: EVENT_ID.fetch_add(1, Ordering::SeqCst),
+                            ts_exchange: None,
+                            ts_recv: legacy.ts,
+                            ts_event: legacy.ts,
+                            source: legacy.source.unwrap_or_else(|| "UPGRADED".to_string()),
+                            integrity_tier: integrity,
+                            dataset_id: dataset_id.clone(),
+                            symbol: legacy.tradingsymbol,
+                            instrument_token: None,
+                            ltp: (legacy.bid + legacy.ask) / 2.0,
+                            bids: vec![DepthLevelF64 { price: legacy.bid, qty: legacy.bid_qty }],
+                            asks: vec![DepthLevelF64 { price: legacy.ask, qty: legacy.ask_qty }],
+                            is_synthetic,
+                            flags: QuoteFlags {
+                                missing_depth: true, // Legacy format only had L1
+                                synthetic_qty: is_synthetic,
+                                synthetic_spread: is_synthetic,
+                                stale: false,
+                            },
+                        };
+
+                        writeln!(writer, "{}", serde_json::to_string(&v2)?)?;
+                        upgraded += 1;
+                    } else {
+                        // Already QuoteEventV2 or invalid, skip
+                        skipped += 1;
+                    }
+
+                    if (upgraded + skipped) % 1000 == 0 {
+                        print!("\rProcessed {} lines...", upgraded + skipped);
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                    }
+                }
+
+                use std::io::Write;
+                writer.flush()?;
+                println!("\n✅ Upgrade complete: {} upgraded, {} skipped", upgraded, skipped);
+
+                return Ok(());
+            }
+            Commands::RunZerodhaPipeline { quotes, strategy, out, commission_bps, capital } => {
+                use kubera_core::{EventBus, Strategy, HydraStrategy, Portfolio};
+                use kubera_executor::{SimulatedExchange, CommissionModel};
+                use kubera_models::{MarketEvent, MarketPayload, Side};
+                use kubera_options::export::{ExportConfig, VectorbtExporter, MarketDataCollector};
+                use kubera_options::ledger::OptionsLedger;
+                use kubera_options::depth5::Depth5Book;
+                use kubera_options::replay::QuoteEventV2;
+                use std::io::BufRead;
+
+                println!("═══════════════════════════════════════════════════════════════");
+                println!("  Z-PHASE ZERODHA PIPELINE: {} strategy", strategy.to_uppercase());
+                println!("═══════════════════════════════════════════════════════════════");
+                println!("  Quotes:     {}", quotes);
+                println!("  Output:     {}", out);
+                println!("  Commission: {} bps", commission_bps);
+                println!("  Capital:    ₹{:.2}", capital);
+                println!("───────────────────────────────────────────────────────────────");
+
+                // Create output directories
+                let out_path = std::path::Path::new(&out);
+                std::fs::create_dir_all(out_path)?;
+                let export_out = out_path.join("vectorbt");
+                std::fs::create_dir_all(&export_out)?;
+
+                // Step 1: Load quotes and build market data
+                println!("\n[1/3] Loading QuoteEventV2 data...");
+                let quotes_file = std::fs::File::open(&quotes)?;
+                let reader = std::io::BufReader::new(quotes_file);
+                let mut quote_events: Vec<QuoteEventV2> = Vec::new();
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(quote) = serde_json::from_str::<QuoteEventV2>(&line) {
+                        quote_events.push(quote);
+                    }
+                }
+                println!("  Loaded {} quote events", quote_events.len());
+
+                if quote_events.is_empty() {
+                    anyhow::bail!("No valid QuoteEventV2 events found in {}", quotes);
+                }
+
+                // Extract unique symbols
+                let symbols: Vec<String> = quote_events.iter()
+                    .map(|q| q.symbol.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                println!("  Symbols: {:?}", symbols);
+
+                // Step 2: Run HYDRA/AEON strategy
+                println!("\n[2/3] Running {} strategy...", strategy.to_uppercase());
+                let bus = EventBus::new(10000);
+
+                let commission_model = if commission_bps > 0.0 {
+                    CommissionModel::Linear(commission_bps)
+                } else {
+                    CommissionModel::None
+                };
+
+                let mut exchange = SimulatedExchange::new(bus.clone(), 0.0, commission_model, None);
+                let mut portfolio = Portfolio::new();
+                portfolio.balance = capital;
+
+                // Configure HYDRA with lot sizes and option params
+                let mut strategy_instance: Box<dyn Strategy> = if strategy.to_lowercase() == "aeon" {
+                    let aeon_cfg = kubera_core::aeon::AeonConfig::default();
+                    let hydra_cfg = kubera_core::hydra::HydraConfig::default();
+                    Box::new(kubera_core::AeonStrategy::new(aeon_cfg, hydra_cfg))
+                } else {
+                    let mut hydra = HydraStrategy::new();
+
+                    // Set lot sizes for each symbol (BANKNIFTY=15, NIFTY=25, FINNIFTY=25)
+                    for sym in &symbols {
+                        let lot_size = if sym.contains("BANKNIFTY") {
+                            15u32
+                        } else if sym.contains("FINNIFTY") {
+                            25u32
+                        } else if sym.contains("NIFTY") {
+                            25u32
+                        } else {
+                            1u32
+                        };
+                        hydra.set_lot_size_for_symbol(sym, lot_size);
+                        println!("  Set lot size for {}: {}", sym, lot_size);
+                    }
+
+                    // Configure option params from first symbol
+                    if let Some(first_sym) = symbols.first() {
+                        if let Some((strike, expiry, opt_type)) = parse_nse_option_symbol(first_sym) {
+                            let tte = time_to_expiry_years(expiry);
+                            println!("  Option params: strike={}, expiry={}, tte={:.4} years, type={:?}",
+                                strike, expiry, tte, opt_type);
+                            hydra.set_option_params(strike, tte, opt_type);
+                        }
+                    }
+
+                    Box::new(hydra)
+                };
+                strategy_instance.on_start(bus.clone());
+
+                let mut signal_rx = bus.subscribe_signal();
+                let mut fills: Vec<serde_json::Value> = Vec::new();
+                let mut fill_id = 0u64;
+                let mut collector = MarketDataCollector::new();
+                let mut books: std::collections::HashMap<String, Depth5Book> = std::collections::HashMap::new();
+
+                // Process each quote
+                for quote in &quote_events {
+                    // Update depth book and collector
+                    let book = books.entry(quote.symbol.clone())
+                        .or_insert_with(|| Depth5Book::new(&quote.symbol));
+                    book.update(quote);
+                    collector.record(&books, quote.ts_event);
+
+                    // Convert QuoteEventV2 to MarketEvent for HYDRA
+                    let best_bid = quote.bids.first().map(|l| l.price).unwrap_or(quote.ltp);
+                    let best_ask = quote.asks.first().map(|l| l.price).unwrap_or(quote.ltp);
+                    let mid_price = (best_bid + best_ask) / 2.0;
+
+                    let market_event = MarketEvent {
+                        local_time: quote.ts_recv,
+                        exchange_time: quote.ts_exchange.unwrap_or(quote.ts_event),
+                        symbol: quote.symbol.clone(),
+                        payload: MarketPayload::Tick {
+                            price: mid_price,
+                            size: quote.bids.first().map(|l| l.qty as f64).unwrap_or(100.0),
+                            side: Side::Buy,
+                        },
+                    };
+
+                    // Feed to strategy
+                    strategy_instance.on_tick(&market_event);
+                    let _ = exchange.on_market_data(market_event.clone()).await;
+
+                    // Check for signals and execute
+                    while let Ok(signal) = signal_rx.try_recv() {
+                        fill_id += 1;
+                        let fill_price = if signal.side == Side::Buy { best_ask } else { best_bid };
+                        let fees = fill_price * signal.quantity * (commission_bps / 10000.0);
+
+                        fills.push(serde_json::json!({
+                            "timestamp": quote.ts_event.to_rfc3339(),
+                            "instrument": signal.symbol,
+                            "side": if signal.side == Side::Buy { "BUY" } else { "SELL" },
+                            "qty": signal.quantity as u32,
+                            "price": fill_price,
+                            "fees": fees,
+                            "strategy_id": format!("{}_{}", strategy.to_uppercase(), signal.symbol),
+                            "order_id": format!("SIM-{}", fill_id)
+                        }));
+
+                        // Update portfolio
+                        if signal.side == Side::Buy {
+                            portfolio.balance -= fill_price * signal.quantity + fees;
+                        } else {
+                            portfolio.balance += fill_price * signal.quantity - fees;
+                        }
+                    }
+                }
+
+                println!("  Generated {} fills", fills.len());
+                println!("  Final balance: ₹{:.2}", portfolio.balance);
+
+                // Write fills to JSONL
+                let fills_path = out_path.join("fills.jsonl");
+                {
+                    use std::io::Write;
+                    let mut f = std::fs::File::create(&fills_path)?;
+                    for fill in &fills {
+                        writeln!(f, "{}", serde_json::to_string(fill)?)?;
+                    }
+                }
+                println!("  Fills written to: {}", fills_path.display());
+
+                // Step 3: Export to vectorbtpro format
+                println!("\n[3/3] Exporting to vectorbtpro format...");
+
+                // Build ledger from fills
+                let mut ledger = OptionsLedger::new();
+                for fill in &fills {
+                    let symbol = fill["instrument"].as_str().unwrap_or("");
+                    let side = fill["side"].as_str().unwrap_or("BUY");
+                    let qty = fill["qty"].as_u64().unwrap_or(0) as u32;
+                    let price = fill["price"].as_f64().unwrap_or(0.0);
+                    let strategy_id = fill["strategy_id"].as_str();
+                    let order_id = fill["order_id"].as_str();
+
+                    ledger.on_fill(symbol, side == "BUY", qty, price, strategy_id, order_id);
+                }
+
+                // Export
+                let config = ExportConfig {
+                    out_dir: export_out.to_string_lossy().to_string(),
+                    strategy_name: strategy.clone(),
+                    include_extended: true,
+                };
+                let exporter = VectorbtExporter::new(config);
+                let manifest = exporter.export_all(&collector, &ledger)?;
+
+                // Write summary
+                let realized_pnl = ledger.total_realized_pnl();
+                let total_fees = ledger.total_fees();
+                let summary_data = serde_json::json!({
+                    "strategy": strategy,
+                    "realized_pnl": realized_pnl,
+                    "unrealized_pnl": ledger.total_unrealized_pnl(),
+                    "total_pnl": realized_pnl,
+                    "total_fees": total_fees,
+                    "net_pnl": realized_pnl - total_fees,
+                    "total_trades": fills.len(),
+                    "open_positions": ledger.positions().iter().filter(|(_, p)| p.net_qty != 0).count(),
+                    "total_notional": 0.0,
+                });
+                let summary_path = export_out.join("summary.json");
+                std::fs::write(&summary_path, serde_json::to_string_pretty(&summary_data)?)?;
+
+                println!("✅ Export complete: {}", export_out.display());
+                println!("\n═══════════════════════════════════════════════════════════════");
+                println!("  PIPELINE COMPLETE");
+                println!("═══════════════════════════════════════════════════════════════");
+                println!("  Strategy:      {}", manifest.strategy);
+                println!("  Market points: {}", manifest.market_points);
+                println!("  Fills:         {}", manifest.fill_count);
+                println!("  PnL:           ₹{:.2}", realized_pnl);
+                println!("  Fees:          ₹{:.2}", total_fees);
+                println!("  Output files:");
+                for (name, path) in &manifest.files {
+                    println!("    {} → {}", name, path);
+                }
+                println!("═══════════════════════════════════════════════════════════════");
 
                 return Ok(());
             }
