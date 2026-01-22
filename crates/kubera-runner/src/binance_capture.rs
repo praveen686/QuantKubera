@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
-use kubera_options::replay::QuoteEvent;
+use kubera_options::replay::{QuoteEvent, QuoteIntegrity};
 
 #[derive(Debug, serde::Deserialize)]
 struct BookTickerEvent {
@@ -104,6 +104,9 @@ pub async fn capture_book_ticker_jsonl(symbol: &str, out_path: &Path, duration_s
             ask: parse_f64(&ev.ask_price)?,
             bid_qty: parse_u32_qty(&ev.bid_qty)?,
             ask_qty: parse_u32_qty(&ev.ask_qty)?,
+            source: Some("BINANCE_BOOKTICKER".to_string()),
+            integrity: Some(QuoteIntegrity::RealDepth),
+            is_synthetic: Some(false),
         };
 
         let line = serde_json::to_string(&q)?;

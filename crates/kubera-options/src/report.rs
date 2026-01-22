@@ -22,6 +22,24 @@ pub struct FillMetrics {
     pub slippage_bps_p99: f64,
 }
 
+/// Input file hashes for reproducibility verification.
+/// Enables "same inputs → same outputs" auditing.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct InputHashes {
+    /// SHA256 hash of the replay dataset (quotes.jsonl or depth.jsonl)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_sha256: Option<String>,
+    /// SHA256 hash of the orders file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orders_sha256: Option<String>,
+    /// SHA256 hash of the intents file (if used)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intents_sha256: Option<String>,
+    /// SHA256 hash of the depth file (if L2 mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth_sha256: Option<String>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BacktestReport {
     pub created_at: DateTime<Utc>,
@@ -29,6 +47,9 @@ pub struct BacktestReport {
     pub venue: String,
     pub dataset: String,
     pub fill: FillMetrics,
+    /// Input file hashes for reproducibility
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<InputHashes>,
     pub notes: Vec<String>,
 }
 

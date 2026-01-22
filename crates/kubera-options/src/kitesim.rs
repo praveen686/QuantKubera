@@ -890,6 +890,9 @@ mod tests {
                 ask: 101.0,
                 bid_qty: 500,
                 ask_qty: 500,
+                source: None,
+                integrity: None,
+                is_synthetic: None,
             }),
             ReplayEvent::Quote(QuoteEvent {
                 ts: t0 + Duration::milliseconds(20),
@@ -898,6 +901,9 @@ mod tests {
                 ask: 81.0,
                 bid_qty: 10,
                 ask_qty: 10,
+                source: None,
+                integrity: None,
+                is_synthetic: None,
             }),
         ];
         let mut feed = ReplayFeed::new(events);

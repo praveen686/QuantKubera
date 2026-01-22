@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::Message;
 use byteorder::{BigEndian, ByteOrder};
 use serde::Deserialize;
 
-use kubera_options::replay::QuoteEvent;
+use kubera_options::replay::{QuoteEvent, QuoteIntegrity};
 
 const KITE_API_URL: &str = "https://api.kite.trade";
 
@@ -116,8 +116,20 @@ async fn fetch_instrument_tokens(
     Ok(tokens)
 }
 
+/// Parsed tick data with integrity watermark.
+/// Returns (token, best_bid, best_ask, bid_qty, ask_qty, is_synthetic).
+struct ParsedTick {
+    token: u32,
+    bid: f64,
+    ask: f64,
+    bid_qty: u32,
+    ask_qty: u32,
+    /// True if bid/ask/qty are synthetic (LTP fallback)
+    is_synthetic: bool,
+}
+
 /// Parse binary tick data from Kite WebSocket.
-/// Returns (token, best_bid, best_ask, bid_qty, ask_qty) if valid.
+/// Returns parsed ticks with integrity watermarks.
 ///
 /// Kite Binary Format (Full mode - 184 bytes):
 /// - Offset 0-4: Token (uint32)
@@ -138,7 +150,7 @@ async fn fetch_instrument_tokens(
 /// - Offset +0: Quantity (int32)
 /// - Offset +4: Price (int32, divide by 100)
 /// - Offset +8: Orders (int16) + padding (2 bytes)
-fn parse_tick(data: &[u8]) -> Option<Vec<(u32, f64, f64, u32, u32)>> {
+fn parse_tick(data: &[u8]) -> Option<Vec<ParsedTick>> {
     if data.len() < 4 {
         return None;
     }
@@ -201,27 +213,55 @@ fn parse_tick(data: &[u8]) -> Option<Vec<(u32, f64, f64, u32, u32)>> {
                 && best_ask_price < ltp * 1.5;
 
             if valid_depth {
-                ticks.push((token, best_bid_price, best_ask_price, best_bid_qty, best_ask_qty));
+                ticks.push(ParsedTick {
+                    token,
+                    bid: best_bid_price,
+                    ask: best_ask_price,
+                    bid_qty: best_bid_qty,
+                    ask_qty: best_ask_qty,
+                    is_synthetic: false,
+                });
             } else if ltp > 0.0 {
                 // Fallback: use LTP with synthetic spread (0.1%) and synthetic quantity
                 // Use 150 as synthetic qty (~10 lots for BANKNIFTY options)
                 let spread = ltp * 0.001;
                 let synthetic_qty = 150u32;
-                ticks.push((token, ltp - spread, ltp + spread, synthetic_qty, synthetic_qty));
+                ticks.push(ParsedTick {
+                    token,
+                    bid: ltp - spread,
+                    ask: ltp + spread,
+                    bid_qty: synthetic_qty,
+                    ask_qty: synthetic_qty,
+                    is_synthetic: true,
+                });
             }
         } else if packet_len >= 44 {
             // Quote mode - use LTP with synthetic spread
             if ltp > 0.0 {
                 let spread = ltp * 0.001;
                 let synthetic_qty = 150u32;
-                ticks.push((token, ltp - spread, ltp + spread, synthetic_qty, synthetic_qty));
+                ticks.push(ParsedTick {
+                    token,
+                    bid: ltp - spread,
+                    ask: ltp + spread,
+                    bid_qty: synthetic_qty,
+                    ask_qty: synthetic_qty,
+                    is_synthetic: true,
+                });
             }
         } else if packet_len >= 8 {
             // LTP mode - use LTP with synthetic spread
             if ltp > 0.0 {
                 let spread = ltp * 0.001;
                 let synthetic_qty = 150u32;
-                ticks.push((token, ltp - spread, ltp + spread, synthetic_qty, synthetic_qty));
+                ticks.push(ParsedTick {
+                    token,
+                    bid: ltp - spread,
+                    ask: ltp + spread,
+                    bid_qty: synthetic_qty,
+                    ask_qty: synthetic_qty,
+                    is_synthetic: true,
+                });
             }
         }
 
@@ -324,15 +364,24 @@ pub async fn capture_zerodha_quotes(
         match item {
             Message::Binary(data) => {
                 if let Some(ticks) = parse_tick(&data) {
-                    for (token, bid, ask, bid_qty, ask_qty) in ticks {
-                        if let Some(symbol) = token_to_symbol.get(&token) {
+                    for tick in ticks {
+                        if let Some(symbol) = token_to_symbol.get(&tick.token) {
+                            let integrity = if tick.is_synthetic {
+                                QuoteIntegrity::SyntheticFallback
+                            } else {
+                                QuoteIntegrity::RealDepth
+                            };
+
                             let event = QuoteEvent {
                                 ts: Utc::now(),
                                 tradingsymbol: symbol.clone(),
-                                bid,
-                                ask,
-                                bid_qty,
-                                ask_qty,
+                                bid: tick.bid,
+                                ask: tick.ask,
+                                bid_qty: tick.bid_qty,
+                                ask_qty: tick.ask_qty,
+                                source: Some("ZERODHA_WS".to_string()),
+                                integrity: Some(integrity),
+                                is_synthetic: Some(tick.is_synthetic),
                             };
 
                             let line = serde_json::to_string(&event)?;

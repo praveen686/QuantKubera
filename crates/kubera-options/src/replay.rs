@@ -19,18 +19,49 @@ use serde::{Deserialize, Serialize};
 // Re-export deterministic depth types from the models crate (canonical location)
 pub use kubera_models::{DepthEvent, DepthLevel};
 
+/// Quote integrity tier for audit trail.
+/// Parallels `IntegrityTier` in DepthEvent for consistent watermarking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum QuoteIntegrity {
+    /// Real depth data from exchange (bid_qty/ask_qty from order book)
+    RealDepth,
+    /// Synthetic fallback: LTP with synthetic spread and quantity
+    #[default]
+    SyntheticFallback,
+    /// Post-processed or transformed data (e.g., qty patch)
+    Transformed,
+}
+
 /// Best bid/ask quote snapshot for an individual instrument (L1).
 ///
 /// All prices are in quote currency (e.g., rupees, USDT) and quantities are
-/// in base units. This is the legacy format for backward compatibility.
+/// in base units.
+///
+/// ## Integrity Watermarks (Z0 Certification)
+/// - `source`: Data origin (e.g., "ZERODHA_WS", "BINANCE_BOOKTICKER")
+/// - `integrity`: Quote grade (real depth vs synthetic fallback)
+/// - `is_synthetic`: True if bid/ask/qty are synthetic (not from real depth)
+///
+/// These fields enable "no silent degradation" auditing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuoteEvent {
+    /// Capture timestamp (UTC). Note: This is capture wallclock time,
+    /// not exchange timestamp. Determinism is "file deterministic."
     pub ts: DateTime<Utc>,
     pub tradingsymbol: String,
     pub bid: f64,
     pub ask: f64,
     pub bid_qty: u32,
     pub ask_qty: u32,
+    /// Data source identifier (e.g., "ZERODHA_WS", "BINANCE_BOOKTICKER")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Quote integrity tier for audit trail
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<QuoteIntegrity>,
+    /// True if bid/ask/qty are synthetic (LTP fallback or transformed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_synthetic: Option<bool>,
 }
 
 /// Replay event stream.

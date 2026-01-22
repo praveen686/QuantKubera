@@ -1,0 +1,31 @@
+{
+  "tool": "patch_quotes_qty.py",
+  "tool_version": "1.0.0",
+  "timestamp": "2026-01-22T06:43:04.939735+00:00",
+  "input": {
+    "path": "data/replay/BANKNIFTY/2026-01-22/quotes_original.jsonl",
+    "sha256": "ORIGINAL_NOT_PRESERVED",
+    "note": "Original capture had bid_qty=0, ask_qty=0 due to synthetic fallback bug"
+  },
+  "output": {
+    "path": "data/replay/BANKNIFTY/2026-01-22/quotes.jsonl",
+    "sha256": "73cce8ab782baf71cb88f1584fa44f56b34ad93b271bbdfc491da396c233d096"
+  },
+  "transformation": {
+    "rule": "patch_zero_qty_with_synthetic",
+    "synthetic_qty": 150,
+    "description": "Replace bid_qty=0 and ask_qty=0 with synthetic value 150"
+  },
+  "stats": {
+    "total_quotes": 1202,
+    "patched_quotes": 1202,
+    "unchanged_quotes": 0
+  },
+  "integrity_tier": "TRANSFORMED",
+  "notes": [
+    "This transformation corrects a bug in zerodha_capture.rs synthetic fallback.",
+    "Original capture used synthetic_qty=0 instead of synthetic_qty=150.",
+    "Bug fix committed in 6bc4b2b.",
+    "Data is marked TRANSFORMED for audit trail."
+  ]
+}

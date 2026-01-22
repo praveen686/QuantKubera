@@ -15,8 +15,9 @@ use std::path::Path;
 use kubera_options::execution::{LegSide, LegStatus, MultiLegOrder};
 use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLegCoordinator, SimExecutionMode};
 use kubera_options::replay::{QuoteEvent, DepthEvent, ReplayEvent, ReplayFeed};
-use kubera_options::report::{BacktestReport, FillMetrics};
+use kubera_options::report::{BacktestReport, FillMetrics, InputHashes};
 use kubera_options::specs::SpecStore;
+use sha2::{Sha256, Digest};
 
 use crate::binance_exchange_info::fetch_spot_specs;
 use crate::order_io::OrderFile;
@@ -59,6 +60,22 @@ pub struct KiteSimCliConfig {
 
 fn parse_rfc3339_utc(s: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(s)?.with_timezone(&Utc))
+}
+
+/// Compute SHA256 hash of a file for reproducibility auditing.
+fn compute_file_sha256(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut file = File::open(path).with_context(|| format!("open file for hashing: {:?}", path))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Load JSONL quotes. Each line must be a QuoteEvent JSON object.
@@ -282,12 +299,32 @@ pub async fn run_kitesim_backtest_cli(cfg: KiteSimCliConfig) -> Result<()> {
         "NSE-Zerodha-Sim"
     };
 
+    // Compute input hashes for reproducibility auditing
+    let mut input_hashes = InputHashes::default();
+    if let Ok(hash) = compute_file_sha256(replay_path) {
+        input_hashes.replay_sha256 = Some(hash);
+    }
+    if let Ok(hash) = compute_file_sha256(orders_path) {
+        input_hashes.orders_sha256 = Some(hash);
+    }
+    if let Some(ref ip) = cfg.intents_path {
+        if let Ok(hash) = compute_file_sha256(Path::new(ip)) {
+            input_hashes.intents_sha256 = Some(hash);
+        }
+    }
+    if let Some(ref dp) = cfg.depth_path {
+        if let Ok(hash) = compute_file_sha256(Path::new(dp)) {
+            input_hashes.depth_sha256 = Some(hash);
+        }
+    }
+
     let mut report = BacktestReport::default();
     report.created_at = Utc::now();
     report.engine = "KiteSim".to_string();
     report.venue = venue_label.to_string();
     report.dataset = replay_path.to_string_lossy().to_string();
     report.fill = fill;
+    report.inputs = Some(input_hashes);
     report.notes.push(format!("strategy={}", strategy_name));
     if use_intents {
         report.notes.push(format!("intents_file={}", cfg.intents_path.as_ref().unwrap()));
