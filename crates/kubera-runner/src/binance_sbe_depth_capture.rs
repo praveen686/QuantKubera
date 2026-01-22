@@ -258,13 +258,12 @@ pub async fn capture_sbe_depth_jsonl(
     let sym_upper = symbol.to_uppercase();
     let sym_lower = symbol.to_lowercase();
 
-    // Step 1: Fetch REST snapshot for bootstrap
-    println!("Fetching depth snapshot for {}...", sym_upper);
-    let snapshot = fetch_depth_snapshot(&sym_upper, 1000).await?;
-    let snapshot_last_id = snapshot.last_update_id;
-    println!("Snapshot lastUpdateId: {}", snapshot_last_id);
+    // CORRECT BOOTSTRAP ORDER (per Binance docs):
+    // 1. Connect to WebSocket FIRST and start buffering
+    // 2. THEN fetch REST snapshot
+    // 3. Find sync point where first_update_id <= snapshot.lastUpdateId+1 <= last_update_id
 
-    // Step 2: Connect to SBE stream
+    // Step 1: Connect to SBE stream FIRST
     let url_str = "wss://stream-sbe.binance.com:9443/stream";
     println!("Connecting to Binance SBE stream: {}", url_str);
 
@@ -291,6 +290,53 @@ pub async fn capture_sbe_depth_jsonl(
     println!("Subscribing to {}@depth...", sym_lower);
     write.send(Message::Text(sub.to_string())).await?;
 
+    // Wait for subscription confirmation and buffer some initial messages
+    let mut initial_buffer: VecDeque<DepthUpdate> = VecDeque::new();
+    let mut subscription_confirmed = false;
+
+    // Buffer messages for up to 2 seconds while waiting for subscription confirmation
+    let buffer_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < buffer_deadline {
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(500), read.next()).await;
+        match msg {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if text.contains("\"result\":null") {
+                    println!("Subscription confirmed");
+                    subscription_confirmed = true;
+                } else if text.contains("\"error\"") {
+                    bail!("Subscription error: {}", text);
+                }
+            }
+            Ok(Some(Ok(Message::Binary(bin)))) => {
+                if bin.len() >= SBE_HEADER_SIZE {
+                    if let Ok(header) = SbeHeader::decode(&bin[..SBE_HEADER_SIZE]) {
+                        if header.template_id == 10003 {
+                            if let Ok(update) = BinanceSbeDecoder::decode_depth_update(&header, &bin[SBE_HEADER_SIZE..]) {
+                                initial_buffer.push_back(update);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if subscription_confirmed && !initial_buffer.is_empty() {
+            break;
+        }
+    }
+
+    if !subscription_confirmed {
+        bail!("Subscription not confirmed within 2 seconds");
+    }
+
+    println!("Buffered {} initial depth updates", initial_buffer.len());
+
+    // Step 2: NOW fetch REST snapshot (after WebSocket is connected and buffering)
+    println!("Fetching depth snapshot for {}...", sym_upper);
+    let snapshot = fetch_depth_snapshot(&sym_upper, 1000).await?;
+    let snapshot_last_id = snapshot.last_update_id;
+    println!("Snapshot lastUpdateId: {}", snapshot_last_id);
+
     // Open output file
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -302,11 +348,58 @@ pub async fn capture_sbe_depth_jsonl(
 
     let mut stats = CaptureStats::default();
     let mut state = BootstrapState::WaitingForSnapshot;
-    let mut diff_buffer: VecDeque<DepthUpdate> = VecDeque::new();
+
+    // Start with initial buffer
+    let mut diff_buffer: VecDeque<DepthUpdate> = initial_buffer;
+
+    // Step 3: Check buffered messages for sync point FIRST
+    // Since we fetched snapshot after buffering, the sync point might already be in the buffer
+    for update in diff_buffer.iter() {
+        if update.first_update_id <= snapshot_last_id + 1
+            && snapshot_last_id + 1 <= update.last_update_id
+        {
+            println!("Bootstrap sync found in buffer: U={}, u={}, snapshot={}",
+                update.first_update_id, update.last_update_id, snapshot_last_id);
+
+            // Write snapshot first
+            let snapshot_event = snapshot_to_depth_event(
+                &snapshot, &sym_upper, price_exponent, qty_exponent
+            )?;
+            let line = serde_json::to_string(&snapshot_event)?;
+            file.write_all(line.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+            stats.snapshot_written = true;
+            stats.events_written += 1;
+
+            // Apply buffered diffs that come after snapshot
+            let mut last_update_id = snapshot_last_id;
+            for buffered in diff_buffer.iter() {
+                if buffered.first_update_id > snapshot_last_id {
+                    let event = sbe_depth_to_event(
+                        buffered, &sym_upper, price_exponent, qty_exponent
+                    );
+                    let line = serde_json::to_string(&event)?;
+                    file.write_all(line.as_bytes()).await?;
+                    file.write_all(b"\n").await?;
+                    stats.events_written += 1;
+                    last_update_id = buffered.last_update_id;
+                }
+            }
+
+            state = BootstrapState::Ready { last_update_id };
+            println!("Bootstrap complete from buffer, now capturing...");
+            break;
+        }
+    }
+
+    // Clear buffer if bootstrap completed (no longer needed)
+    if matches!(state, BootstrapState::Ready { .. }) {
+        diff_buffer.clear();
+    }
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
 
-    // Step 3: Process messages with bootstrap logic
+    // Step 4: Process remaining messages
     while tokio::time::Instant::now() < deadline {
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), read.next()).await;
         let item = match msg {
@@ -351,8 +444,6 @@ pub async fn capture_sbe_depth_jsonl(
                         if update.first_update_id <= snapshot_last_id + 1
                             && snapshot_last_id + 1 <= update.last_update_id
                         {
-                            println!("Bootstrap sync found: U={}, u={}, snapshot={}",
-                                update.first_update_id, update.last_update_id, snapshot_last_id);
 
                             // Write snapshot first
                             let snapshot_event = snapshot_to_depth_event(
@@ -417,8 +508,8 @@ pub async fn capture_sbe_depth_jsonl(
             }
             Message::Text(text) => {
                 // JSON response (subscription confirmation, etc.)
-                if text.contains("\"result\":null") {
-                    println!("Subscription confirmed");
+                if text.contains("\"error\"") {
+                    eprintln!("Server error: {}", text);
                 }
             }
             Message::Ping(p) => {
@@ -431,7 +522,8 @@ pub async fn capture_sbe_depth_jsonl(
     file.flush().await?;
 
     if !stats.snapshot_written {
-        bail!("Bootstrap failed: never synced with snapshot");
+        bail!("Bootstrap failed: never synced with snapshot. \
+            This may indicate a timing issue - try again or increase buffer time.");
     }
 
     Ok(stats)

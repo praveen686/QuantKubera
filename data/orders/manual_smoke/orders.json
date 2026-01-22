@@ -1,0 +1,19 @@
+{
+  "strategy_name": "MANUAL_SMOKE",
+  "orders": [
+    {
+      "strategy_name": "MANUAL_SMOKE",
+      "legs": [
+        {
+          "tradingsymbol": "BANKNIFTY26JAN59000CE",
+          "exchange": "NFO",
+          "side": "Buy",
+          "quantity": 15,
+          "order_type": "Market",
+          "price": null
+        }
+      ],
+      "total_margin_required": 0.0
+    }
+  ]
+}

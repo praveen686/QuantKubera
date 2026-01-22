@@ -1,0 +1,17 @@
+{
+  "underlying": "BANKNIFTY",
+  "expiry": "2026-01-26",
+  "captured_at": "2026-01-22",
+  "instruments": [
+    {"tradingsymbol": "BANKNIFTY26JAN58800CE", "exchange": "NFO", "instrument_token": 13283330, "strike": 58800, "option_type": "CE"},
+    {"tradingsymbol": "BANKNIFTY26JAN58800PE", "exchange": "NFO", "instrument_token": 13289218, "strike": 58800, "option_type": "PE"},
+    {"tradingsymbol": "BANKNIFTY26JAN58900CE", "exchange": "NFO", "instrument_token": 13289986, "strike": 58900, "option_type": "CE"},
+    {"tradingsymbol": "BANKNIFTY26JAN58900PE", "exchange": "NFO", "instrument_token": 13290242, "strike": 58900, "option_type": "PE"},
+    {"tradingsymbol": "BANKNIFTY26JAN59000CE", "exchange": "NFO", "instrument_token": 13290498, "strike": 59000, "option_type": "CE"},
+    {"tradingsymbol": "BANKNIFTY26JAN59000PE", "exchange": "NFO", "instrument_token": 13293314, "strike": 59000, "option_type": "PE"},
+    {"tradingsymbol": "BANKNIFTY26JAN59100CE", "exchange": "NFO", "instrument_token": 13294082, "strike": 59100, "option_type": "CE"},
+    {"tradingsymbol": "BANKNIFTY26JAN59100PE", "exchange": "NFO", "instrument_token": 13297410, "strike": 59100, "option_type": "PE"},
+    {"tradingsymbol": "BANKNIFTY26JAN59200CE", "exchange": "NFO", "instrument_token": 13297666, "strike": 59200, "option_type": "CE"},
+    {"tradingsymbol": "BANKNIFTY26JAN59200PE", "exchange": "NFO", "instrument_token": 13297922, "strike": 59200, "option_type": "PE"}
+  ]
+}

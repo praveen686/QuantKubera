@@ -17,7 +17,6 @@ use kubera_options::kitesim::{AtomicExecPolicy, KiteSim, KiteSimConfig, MultiLeg
 use kubera_options::replay::{QuoteEvent, DepthEvent, ReplayEvent, ReplayFeed};
 use kubera_options::report::{BacktestReport, FillMetrics};
 use kubera_options::specs::SpecStore;
-use kubera_models::IntegrityTier;
 
 use crate::binance_exchange_info::fetch_spot_specs;
 use crate::order_io::OrderFile;

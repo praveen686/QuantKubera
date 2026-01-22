@@ -1,0 +1,27 @@
+{
+  "created_at": "2026-01-22T06:27:51.235733912Z",
+  "engine": "KiteSim",
+  "venue": "NSE-Zerodha-Sim",
+  "dataset": "data/replay/BANKNIFTY/2026-01-22/quotes.jsonl",
+  "fill": {
+    "orders_total": 1,
+    "legs_total": 1,
+    "legs_filled": 1,
+    "legs_partially_filled": 0,
+    "legs_rejected": 0,
+    "legs_cancelled": 0,
+    "rollbacks": 0,
+    "timeouts": 0,
+    "hedges_attempted": 0,
+    "hedges_filled": 0,
+    "slippage_bps_p50": 10.000000000000565,
+    "slippage_bps_p90": 10.000000000000565,
+    "slippage_bps_p99": 10.000000000000565
+  },
+  "notes": [
+    "strategy=MANUAL_SMOKE",
+    "orders_file=data/orders/manual_smoke/orders.json",
+    "venue=auto",
+    "qty_scale=1000000"
+  ]
+}

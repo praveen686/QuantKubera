@@ -34,6 +34,7 @@ mod binance_capture;
 mod binance_depth_capture;  // DEPRECATED: Use binance_sbe_depth_capture for production
 mod binance_sbe_depth_capture;  // SBE-based depth capture (Phase-2A authoritative)
 mod binance_exchange_info;
+mod zerodha_capture;  // Zerodha quote capture for NSE/NFO
 use web_server::{WebMessage, ServerState};
 use circuit_breakers::{TradingCircuitBreakers, CircuitBreakerStatus};
 use tokio::time::Duration;
@@ -268,6 +269,34 @@ enum Commands {
         qty_exponent: i8,
     },
 
+    /// Discover BANKNIFTY/NIFTY option symbols for nearest expiry.
+    /// Prints ATM ± N strikes for capture.
+    DiscoverZerodha {
+        /// Underlying: NIFTY, BANKNIFTY, FINNIFTY
+        #[arg(long, default_value = "BANKNIFTY")]
+        underlying: String,
+
+        /// Strikes around ATM (e.g., 2 = ATM ± 2 strikes = 5 strikes * 2 option types = 10 symbols)
+        #[arg(long, default_value_t = 2)]
+        strikes: u32,
+    },
+
+    /// Capture Zerodha quotes from Kite WebSocket into QuoteEvent JSONL.
+    /// Requires Zerodha credentials in .env and Python sidecar for TOTP auth.
+    CaptureZerodha {
+        /// Comma-separated symbols, e.g. BANKNIFTY26JAN48000CE,BANKNIFTY26JAN48000PE
+        #[arg(long)]
+        symbols: String,
+
+        /// Output path, e.g. data/replay/BANKNIFTY/2026-01-22/quotes.jsonl
+        #[arg(long)]
+        out: String,
+
+        /// Capture duration in seconds
+        #[arg(long, default_value_t = 300)]
+        duration_secs: u64,
+    },
+
     /// Offline KiteSim backtest runner (Mode B/C).
     BacktestKitesim {
         /// Venue selector: auto, binance, zerodha
@@ -476,6 +505,53 @@ async fn async_main() -> anyhow::Result<()> {
                     price_exponent,
                     qty_exponent,
                     &api_key,
+                ).await?;
+                println!("Capture complete: {} ({})", out, stats);
+                return Ok(());
+            }
+            Commands::DiscoverZerodha { underlying, strikes } => {
+                use kubera_connectors::ZerodhaAutoDiscovery;
+
+                println!("Discovering {} options (ATM ± {} strikes)...", underlying, strikes);
+                let discovery = ZerodhaAutoDiscovery::from_sidecar()?;
+
+                let config = kubera_connectors::AutoDiscoveryConfig {
+                    underlying: underlying.to_uppercase(),
+                    strikes_around_atm: strikes,
+                    strike_interval: if underlying.to_uppercase() == "BANKNIFTY" { 100.0 } else { 50.0 },
+                    ..Default::default()
+                };
+
+                let symbols = discovery.discover_symbols(&config).await?;
+
+                println!("\n✅ Found {} symbols for {}:\n", symbols.len(), underlying);
+                let symbol_names: Vec<&str> = symbols.iter().map(|(s, _)| s.as_str()).collect();
+                for (sym, token) in &symbols {
+                    println!("  {} (token: {})", sym, token);
+                }
+
+                println!("\n📋 Copy this for --symbols:");
+                println!("{}", symbol_names.join(","));
+                return Ok(());
+            }
+            Commands::CaptureZerodha { symbols, out, duration_secs } => {
+                let out_path = std::path::Path::new(&out);
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let symbol_list: Vec<String> = symbols.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if symbol_list.is_empty() {
+                    return Err(anyhow::anyhow!("No symbols provided. Use --symbols BANKNIFTY26JAN48000CE,BANKNIFTY26JAN48000PE"));
+                }
+                println!("Capturing Zerodha quotes for {} symbols for {} seconds...",
+                    symbol_list.len(), duration_secs);
+                let stats = zerodha_capture::capture_zerodha_quotes(
+                    &symbol_list,
+                    out_path,
+                    duration_secs,
                 ).await?;
                 println!("Capture complete: {} ({})", out, stats);
                 return Ok(());
